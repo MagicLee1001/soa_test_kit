@@ -1,0 +1,10 @@
+ddt==1.6.0
+loguru==0.7.2
+openpyxl==3.1.2
+paramiko==3.3.1
+prettytable
+PyQt5
+requests
+pyyaml==6.0.1
+svn==1.0.1
+pyinstaller==5.12.0

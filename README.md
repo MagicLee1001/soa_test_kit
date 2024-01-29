@@ -11,7 +11,7 @@ Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (
 ## 环境配置
 - 进入项目根目录
     ```
-    cd autoli-sil-xbp
+    cd soa_test_kit
     ```
 - 安装依赖库
     ```

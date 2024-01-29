@@ -23,11 +23,11 @@ Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (
     ```
 - DBO 矩阵文件
     ```
-    固定路径: .\data\matrix\dbc_lin_dbis_matrix.dbo
+    固定路径: .\data\matrix\dbc_lin_matrix.dbo
     ```
 - DDS idl文件
     ```
-    固定路径: .\data\matrix\XBP.xml
+    固定路径: .\data\matrix\idl.xml
     ```
 - 测试用例路径
     ```
@@ -42,10 +42,10 @@ Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (
 1. 信号规范
     ```
     常规信号
-    SRV_        : DDS消息，Topic下的DDS信号格式，大多为要发布的信号（也可用来订阅）
-    MSG_        : DDS消息，Topic下的DDS信号格式，大多为要订阅的信号（也可用来发布）
-    A2M_        : sil服务通过TCP协议send的消息，测试环境recv
-    M2A_        : 测试环境通过TCP协议send的消息，sil服务recv
+    Pub_        : DDS消息，Topic下的DDS信号格式，大多为要发布的信号（也可用来订阅）
+    Sub_        : DDS消息，Topic下的DDS信号格式，大多为要订阅的信号（也可用来发布）
+    Recv_        : sil服务通过TCP协议send的消息，测试环境recv
+    Send_        : 测试环境通过TCP协议send的消息，sil服务recv
     sql3_       : vcs数据库的信号，用于PassConditons校验，后面跟vcs信号名
     sql3_switch : 当前步骤Actions中触发一次查询vcs数据库操作，如: sql3_switch=1
     sql3_write_ : 当前步骤Actions中触发一次修改vcs数据库操作，后面跟vcs信号名
@@ -58,13 +58,13 @@ Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (
 2. 用例语法
     ```
     Actions字段中信号定义:
-    SRV_, MSG_, M2A_: 均表示给被测对象发送消息
-    A2M_: 表示将当前测试环境中 A2M信号变量重新赋值（通常用于比较信号是否变化的前置条件）
+    Pub_, Sub_, Send_: 均表示给被测对象发送消息
+    Recv_: 表示将当前测试环境中 A2M信号变量重新赋值（通常用于比较信号是否变化的前置条件）
     sql3_switch: 用于一次查询vcs数据库的操作，值为任意（默认为 1）
     sql3_write_: 用于一次修改vcs数据库的操作
    
     PassContions字段中信号定义:
-    SRV_, MSG_, A2M_: 均表示接收被测对象发来的消息
+    Pub_, Sub_, Recv_: 均表示接收被测对象发来的消息
     sql3_: 用于比较vcs数据库中存储的信号，要获取当前最新的信号值则需要在Actions中通过 sql3_switch动作触发
     ```
 
@@ -73,7 +73,7 @@ Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (
 
 1. 检查当前dds矩阵文件是否适配
     ```
-    .\data\matrix\XBP.xml
+    .\data\matrix\idl.xml
     ```
 2. 维护当前dds环境变量（不能漏写,可以多写）
     ```

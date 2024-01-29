@@ -91,7 +91,7 @@ Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (
 ## 测试结果
 1. 测试报告路径
     ```
-    .\result\{YmdHMS}\TestReport_XBP_SIL_xx.html
+    .\result\{YmdHMS}\TestReport_SOA_SIL_xx.html
     ```
 2. 报告说明
     ```

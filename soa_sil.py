@@ -34,7 +34,7 @@ from connector.ssh import SSHConnector
 from runner.variable import vars_mapping
 from runner.tester import CaseTester, TestPrecondition, TestPostCondition, TestHandle, CaseParser
 from runner.remote import Run, CallBack
-from test_sil_xbp import set_test_handle, qt_main
+from test_soa_sil import set_test_handle, qt_main
 
 
 class AutoTestWorker(QThread):

@@ -3,22 +3,18 @@
 # @Time    : 2023/10/19 17:30
 # @File    : sdc.py
 
-
 import os
 import threading
 import socket
 import struct
 import time
-from loguru import logger
-from ctypes import *
+
+from runner.log import logger
+from ctypes import Structure, c_char, c_float, sizeof, memmove, addressof
 from select import select
 from runner.variable import Variable
 
-# VARS_M2A = []
-# VARS_M2A.append(Variable('M2A_test', 0))
 
-VARS_A2M = {}
-VARS_A2M['A2M_test'] = Variable('A2M_test', 0)
 M2A_NAME_TYPE = {}
 
 
@@ -53,7 +49,7 @@ def map_data_type(signal_name):
 
 class StructA2M(Structure):
     _fields_ = [
-        ("signalName", c_char * 32),
+        ("signalName", c_char * 64),
         ("signalValue", c_float)
     ]
 
@@ -65,7 +61,7 @@ class StructM2A:
         self.signal_type = signal_type
 
     def pack(self):
-        return struct.pack('40sfi', self.name, self.value, self.signal_type)
+        return struct.pack('64sfi', self.name, self.value, self.signal_type)
 
 
 class SDCConnector(threading.Thread):
@@ -77,19 +73,21 @@ class SDCConnector(threading.Thread):
     _instance = None
     __first_init = False
     _instance_lock = threading.Lock()
+    conn_lock = threading.Lock()
+    _is_reconnecting = threading.Event()  # 重连事件标志
 
     def __init__(self, dbo_filepath, server_ip='172.31.30.32', server_port=60000):
         """创建单例并只执行一次初始化 保证只有一个socket在使用"""
         with self._instance_lock:
             if not self.__first_init:
                 super().__init__()
-                self.keep_recv = True
-                self.good_connection = False
+                self._is_keep_recv = threading.Event()
+                self._is_reconnecting.clear()
                 self.dbo_filepath = dbo_filepath
                 self.pre_init()
                 self.server_ip = server_ip
                 self.server_port = server_port
-                self.connect_server()
+                self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 SDCConnector.__first_init = True
 
     def __new__(cls, *args, **kwargs):
@@ -100,31 +98,33 @@ class SDCConnector(threading.Thread):
             return cls._instance
 
     def connect_server(self):
-        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.client_socket.connect((self.server_ip, self.server_port))
-        self.client_socket.setblocking(False)
-        self.good_connection = True
+        with self.conn_lock:  # 加锁防止同一时间重复连接出问题
+            self.client_socket.connect((self.server_ip, self.server_port))
+            self.client_socket.setblocking(False)
 
     def reconnect_server(self):
         """
         这里如果主动被调用一次,会导致 tcp_recv抛出异常, 从而触发这个方法会又被调用一次
         """
+        if self._is_reconnecting.is_set():
+            # 已有重连在进行，不需要再次重连
+            return
+        self._is_reconnecting.set()  # 设置重连标志
         self.close()
-        self.good_connection = False
-        self.__first_init = False
-        while True:
+        while not self._is_keep_recv.is_set():
             try:
+                self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.connect_server()
             except socket.error:
                 self.close()
-                time.sleep(2)
+                time.sleep(1)
             else:
                 break
         logger.success('reconnect sil server success')
+        self._is_reconnecting.clear()
 
     def close(self):
         self.client_socket.close()
-        self.good_connection = False
 
     def tcp_send(self, signal):
         logger.info(f'发送TCP消息：{signal.name} = {signal.Value}')
@@ -135,13 +135,20 @@ class SDCConnector(threading.Thread):
         try:
             self.client_socket.sendall(data)
         except socket.error:
-            logger.warning('TCP连接断开,正在尝试重连')
-            self.good_connection = False
-            self.reconnect_server()
-            try:
-                self.client_socket.sendall(data)
-            except Exception as e:
-                logger.error(e)
+            if not self._is_reconnecting.is_set():
+                logger.warning('TCP连接断开, 正在尝试重连并重新发送消息')
+                self.reconnect_server()
+            else:
+                # 等待重连事件结束
+                logger.info('TCP连接断开, 等待重连')
+                while self._is_reconnecting.is_set():
+                    time.sleep(0.5)
+                # 重连完成后再次尝试发送数据
+                try:
+                    logger.info('重新发送成功消息成功')
+                    self.client_socket.sendall(data)
+                except Exception as e:
+                    logger.error(e)
         except Exception as e:
             logger.error(e)
 
@@ -170,9 +177,11 @@ class SDCConnector(threading.Thread):
                 signal_name = c.signalName
                 signal_value = c.signalValue
                 try:
+                    # if signal_name == b'StrWhlSeatAutoSeatSwReq_out_Inne':  # 信号名太长可能被截断
+                    #     signal_name = b'StrWhlSeatAutoSeatSwReq_out_Inner'
                     signal_name_str = 'A2M_' + str(signal_name, encoding='utf-8')
-                    signal = VARS_A2M.get(signal_name_str)
-                except UnicodeDecodeError as e:
+                    signal = Variable(signal_name_str)
+                except UnicodeDecodeError:
                     pass
                 else:
                     if signal is not None:
@@ -180,9 +189,9 @@ class SDCConnector(threading.Thread):
                         logger.info(f'接收TCP消息：{signal_name_str} = {signal_value}')
 
     def add_additional_signals(self):
-        Variable('SIL_Client_CnnctSt', 0)
-        Variable('SIL_Client_Cnnct', 0)
-        Variable('Sw_HandWakeup', 0)
+        Variable('SIL_Client_CnnctSt', 1)
+        Variable('SIL_Client_Cnnct', 1)
+        Variable('Sw_HandWakeup', 1)
 
     def parse_dbo_a2m(self):
         if os.path.exists(self.dbo_filepath):
@@ -191,18 +200,17 @@ class SDCConnector(threading.Thread):
                     if 'tx' in line:
                         index = line.find(',')
                         if index != -1:
-                            VARS_A2M['A2M_' + line[2:index]] = Variable('A2M_' + line[2:index], 0)
+                            Variable('A2M_' + line[2:index], 0)
 
     def parse_dbo_m2a(self):
         if os.path.exists(self.dbo_filepath):
             with open(self.dbo_filepath, 'r') as file:
                 for line in file:
                     if 'rx' in line:
-                        index = line.split(',')
-                        Variable('M2A_' + index[0][2:], 0)
-                        # data = Variable('M2A_' + index[0][2:], 0)
-                        # VARS_M2A.append(data)
-                        M2A_NAME_TYPE[index[0][2:]] = index[2]
+                        line_items = line.split(',')
+                        signal_name = line_items[0][2:]
+                        Variable(f'M2A_{signal_name}', 0)
+                        M2A_NAME_TYPE[signal_name] = line_items[2]
 
     def pre_init(self):
         logger.info('Parse dbo signals to Variable')
@@ -210,49 +218,32 @@ class SDCConnector(threading.Thread):
         self.parse_dbo_m2a()
         self.parse_dbo_a2m()
 
+    def stop(self):
+        self._is_keep_recv.set()
+
     def run(self) -> None:
-        while self.keep_recv:
+        self.connect_server()
+        while not self._is_keep_recv.is_set():
             try:
-                self.tcp_recv()
+                self.tcp_recv()  # select设置了超时时间 超过时间就会继续循环
             except socket.error:
-                logger.warning('TCP连接断开,正在尝试重连')
-                if not self.good_connection:
+                if not self._is_reconnecting.is_set():
+                    logger.warning('TCP连接断开, TCP消息接收线程触发重连 ...')
                     self.reconnect_server()
-                self.good_connection = False
-        logger.info('sdc 接收线程退出')
+        logger.info('sdc 接收tcp消息线程退出')
         self.close()
 
 
 if __name__ == '__main__':
     from settings import env
-    # # 创建TCP socket并连接到指定的IP和端口
-    # ip = '172.31.30.32'
-    # port = 60000
-    # client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # client_socket.connect((ip, port))
-    # client_socket.setblocking(False)
-    # while True:
-    #     SIL_Client_CnnctSt.Value = 1
-    #     signal = StructM2A('SIL_Client_CnnctSt', 1, map_data_type('SIL_Client_CnnctSt'))
-    #     data = signal.pack()
-    #     try:
-    #         res = client_socket.sendall(data)
-    #     except Exception as e:
-    #         logger.error(e)
-    #     time.sleep(10)
-
-    # 类调试
     sdc_client = SDCConnector(env.dbo_filepath, server_ip=env.sil_server_ip, server_port=env.sil_server_port)
     sdc_client.start()  # I/O多路复用 持续接收
     time.sleep(2)
-
+    sdc_client.reconnect_server()
     # 接收同时测试发送
     # 这一步全局Variable已经初始化完成了，只需要改变信号值就行
-
     signal = Variable('M2A_FrtACSwSts_Inner')
     signal.Value = 1
     while True:
         sdc_client.tcp_send(signal)
         time.sleep(2)
-    # print(sizeof(StructA2M()))
-    # sdc_client.close()

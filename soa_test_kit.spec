@@ -4,16 +4,21 @@ from PyInstaller.utils.hooks import collect_data_files
 block_cipher = None
 
 add_files = [
+                ('.\\remote_job.exe','.'),
                 ('.\\settings.yaml','.'),
                 ('.\\ui\\icons\\*', 'ui\\icons'),
                 ('.\\data\\case\\debug\\*', 'data\\case\\debug'),
+                ('.\\data\\case\\xpp\\*', 'data\\case\\xpp'),
                 ('.\\data\\key\\*', 'data\\key'),
                 ('.\\data\\matrix\\*', 'data\\matrix'),
                 ('.\\data\\result', 'data\\result'),
-                ('.\\lidds\\*', 'lidds'),
+                ('.\\data\\log', 'data\\log'),
+                ('.\\data\\conf\\*', 'data\\conf'),
+                ('.\\protocol\\lidds130\\*', 'protocol\\lidds130'),
+                ('.\\protocol\\rtidds\\rticonnextdds-connector\\lib\\win-x64\\*', 'rticonnextdds-connector\\lib\\win-x64'),
              ]
 
-a = Analysis(['sil_xbp.py'],
+a = Analysis(['soa_test_kit.py'],
              pathex=[],
              binaries=[],
              datas=add_files,

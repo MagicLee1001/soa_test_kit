@@ -9,7 +9,12 @@ import yaml
 import threading
 
 # project root path
-work_dir = os.path.normpath(os.path.dirname(__file__))
+# work_dir = os.path.normpath(os.path.dirname(__file__))
+
+if getattr(sys, 'frozen', False):
+    work_dir = os.path.normpath(os.path.dirname(sys.executable))
+else:
+    work_dir = os.path.normpath(os.path.dirname(__file__))
 
 
 class Settings:
@@ -19,15 +24,21 @@ class Settings:
         self.settings_filepath = config_file
         self.remote_event_data = None
         self.remote_callback = None
-        self.is_auto_running = False
+        self.platform_version = 2.0
+        self.has_topic_prefix = False  # eea2.0+vbs的topic需要带前缀
+        self.stop_autotest = False
+        self.disable_sdc = True  # 启动时自动禁用sdc
+        self.module_id_mapping = {}  # 远程执行变量
+        self.case_mapping = {}  # 用例和模块的映射
         self.load(config_file)
 
     def __getattr__(self, item):
-        value = self.configs[item]
-        if type(value) is str and '\\' in value:
-            return os.path.join(work_dir, value)
-        else:
-            return value
+        with self._lock:
+            value = self.configs[item]
+            if type(value) is str and '\\' in value:
+                return os.path.join(work_dir, value)
+            else:
+                return value
 
     def __setattr__(self, key, value):
         with self._lock:
@@ -47,11 +58,3 @@ env = Settings(os.path.join(work_dir, 'settings.yaml'))
 
 if __name__ == '__main__':
     print(vars(env))
-    print(env.sub_topics)
-    print(env.idl_filepath)
-    print(env.case_dir)
-    env.ddt_test_index = 0
-    env.ddt_test_index += 1
-    print(env.ddt_test_index)
-    print(env.remote_event_data)
-    print(env.is_auto_running)

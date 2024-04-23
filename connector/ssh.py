@@ -12,7 +12,7 @@ import re
 import paramiko
 from paramiko.ssh_exception import SSHException
 from functools import wraps
-from loguru import logger
+from runner.log import logger
 from settings import env
 from runner.variable import Variable
 
@@ -107,6 +107,7 @@ class SSHClient:
             self._client.close()
         except:
             pass
+        logger.info('SSH Client 连接通道已关闭')
 
     def close(self):
         self.__del__()
@@ -316,9 +317,10 @@ class SSHConnector(SSHClient):
         Variable('sql3_switch').Value = 0
         self.vin_filepath = '/app_data/common/vin.json'
         self.cfg_wd_filepath = '/app_data/common/cfgwd.json'
+        self.vcs_ip_config_filepath = '/apps/x01/etc/vcs/ip_config.json'
         self.update_dbo_file()
-        self.put_sil_server()
         self.get_xcu_info()
+        # self.put_sil_server()  # 放到PreCondition运行
 
     def open_permission(self):
         self.execute_cmd('mount -o remount rw /')
@@ -329,6 +331,9 @@ class SSHConnector(SSHClient):
         还原测试环境, 恢复到测试之前
         """
         self.open_permission()
+        # 还原vcs配置
+        self.setup_vcs_ip_config(0)
+        # 移除sil仿真相关程序与配置
         self.execute_cmd(f'rm {env.sil_remote_filepath}')
         self.execute_cmd(f'rm {env.sil_sdf_remote_filepath}')
         self.execute_cmd('mv /apps/x01/bin/sdc1 /apps/x01/bin/sdc')
@@ -351,17 +356,31 @@ class SSHConnector(SSHClient):
     def get_xcu_info(self):
         env.xcu_info = {'vin': self.get_vin(), 'config_word': self.get_cfg_wd(), 'baseline_version': '',
                         'acore_version': '', 'apps_version': '', 'bsp_version': '', 'ecu_sub_system': ''}
-        res = self.execute_interact_cmd('liware.tool.dumpsys', console=False)
-        res_list = res.split('\r\n')
-        for i in range(len(res_list)):
-            if 'ro.build.version.baseline' in res_list[i]:
-                env.xcu_info['baseline_version'] = res_list[i].split(' ')[-1].replace('[', '').replace(']', '')
-            elif 'ro.build.version.bsp' in res_list[i]:
-                env.xcu_info['bsp_version'] = res_list[i].split(' ')[-1].replace('[', '').replace(']', '')
-            elif 'ro.build.version.package' in res_list[i]:
-                env.xcu_info['acore_version'] = res_list[i].split(' ')[-1].replace('[', '').replace(']', '')
-            elif 'ro.build.version.livc' in res_list[i]:
-                env.xcu_info['apps_version'] = res_list[i].split(' ')[-1].replace('[', '').replace(']', '')
+        if hasattr(env, 'platform_version') and env.platform_version == 2.5:
+            res = self.execute_interact_cmd('liware.tool.dumpsys', console=False)
+            res_list = res.split('\r\n')
+            for i in range(len(res_list)):
+                if 'ro.build.version.baseline' in res_list[i]:
+                    env.xcu_info['baseline_version'] = res_list[i].split(' ')[-1].replace('[', '').replace(']', '')
+                elif 'ro.build.version.bsp' in res_list[i]:
+                    env.xcu_info['bsp_version'] = res_list[i].split(' ')[-1].replace('[', '').replace(']', '')
+                elif 'ro.build.version.package' in res_list[i]:
+                    env.xcu_info['acore_version'] = res_list[i].split(' ')[-1].replace('[', '').replace(']', '')
+                elif 'ro.build.version.livc' in res_list[i]:
+                    env.xcu_info['apps_version'] = res_list[i].split(' ')[-1].replace('[', '').replace(']', '')
+        else:
+            res = self.execute_interact_cmd('dumpsys', console=False)
+            res_list = res.split('\r\n')
+            for i in range(len(res_list)):
+                if 'XCU Show Version' in res_list[i]:
+                    env.xcu_info['baseline_version'] = res_list[i + 1]
+                    env.xcu_info['acore_version'] = res_list[i + 2]
+                elif 'BSP Version' in res_list[i]:
+                    env.xcu_info['bsp_version'] = res_list[i + 1]
+                elif 'APPS Version' in res_list[i]:
+                    env.xcu_info['apps_version'] = res_list[i + 1]
+                else:
+                    pass
         return env.xcu_info
 
     def get_vin(self):
@@ -449,12 +468,13 @@ class SSHConnector(SSHClient):
             self.execute_cmd(f'chmod 777 {env.sil_sdf_remote_filepath}')
         time.sleep(1)
 
-        output = self.execute_cmd(f'pidof sdc')
-        if output:
-            need_reboot = True
-            logger.info('>>> 开始禁用sdc服务')
-            self.execute_cmd('mv /apps/x01/bin/sdc /apps/x01/bin/sdc1')
-        time.sleep(1)
+        if env.disable_sdc:
+            output = self.execute_cmd(f'pidof sdc')
+            if output:
+                need_reboot = True
+                logger.info('>>> 开始禁用sdc服务')
+                self.execute_cmd('mv /apps/x01/bin/sdc /apps/x01/bin/sdc1')
+            time.sleep(1)
 
         if need_reboot:
             self.execute_cmd('reboot')
@@ -469,7 +489,8 @@ class SSHConnector(SSHClient):
                     break
                 time.sleep(2)
             if not ret:
-                logger.error('>>> 执行环境异常 sil服务未启动')
+                logger.error('>>> 执行环境异常 sil服务未启动 开始回滚')
+                self.recover_sil_environment()
                 raise Exception('sil simulator process not exist')
 
     def get_vsc_db_signals(self):
@@ -495,13 +516,38 @@ class SSHConnector(SSHClient):
         self.execute_cmd(cmd)
         Variable('sql3_write_' + signal_name).Value = signal_value
 
+    def setup_vcs_ip_config(self, status: int):
+        """
+        status:
+            0: DoIP仿真环境关闭
+            1: DoIP仿真环境打开
+        """
+        self.open_permission()
+        match status:
+            case 0:
+                if not hasattr(self, 'default_ip_config'):
+                    logger.info('vcs ip配置为默认状态，无需还原')
+                else:
+                    # 修改当前配置文件为默认配置
+                    res = self.execute_cmd(f'cat {self.vcs_ip_config_filepath}')
+                    logger.info(f'当前vcs ip配置为：{res}')
+                    self.execute_cmd(f"""echo '{json.dumps(self.default_ip_config, indent=4)}' > {self.vcs_ip_config_filepath}""")
+                    res = self.execute_cmd(f'cat {self.vcs_ip_config_filepath}')
+                    logger.info(f'还原后的vcs ip配置为：{res}')
+            case 1:
+                if not hasattr(self, 'default_ip_config'):
+                    self.default_ip_config = json.loads(self.execute_cmd(f'cat {self.vcs_ip_config_filepath}'))
+                    logger.info(f'获取当前vcs ip默认配置：{self.default_ip_config}')
+                target_ip = env.local_net_segment
+                modified_ip_config = {key: target_ip for key, val in self.default_ip_config.items()}
+                self.execute_cmd(f"""echo '{json.dumps(modified_ip_config, indent=4)}' > {self.vcs_ip_config_filepath}""")
+                res = self.execute_cmd(f'cat {self.vcs_ip_config_filepath}')
+                logger.info(f'修改后的vcs ip配置为：{res}')
+
 
 if __name__ == '__main__':
-    ssh_connector = SSHConnector(hostname='172.31.30.32', username='root', password='root')
+    ssh_connector = SSHConnector(hostname='172.31.30.32', username='root', password='')
     print(ssh_connector.get_vin())
-
-    # signals = ssh_connector.get_vsc_db_signals()
-    # print(signals)
 
     # ssh_connector.set_vsc_db_signal(signal_name='ActuEgyMd_out_Inner', signal_value=2)
     # signals = ssh_connector.get_vsc_db_signals()

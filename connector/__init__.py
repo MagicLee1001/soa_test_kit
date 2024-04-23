@@ -7,3 +7,4 @@
 class ConnectorPool:
     dds_reader_pool = {}
     dds_writer_pool = {}
+    topic_obj_pool = {}

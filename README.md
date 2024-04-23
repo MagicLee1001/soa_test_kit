@@ -1,6 +1,6 @@
 # soa_test_kit
 
-<author>likun</author>
+<author>likun likun19941001@163.com</author>
 
 ## 项目描述
 面向服务架构自动化测试框架, 软件
@@ -21,17 +21,33 @@ Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (
     ```
     .\settings.py
     ```
-- DBO 矩阵文件
+- DDS 信号列表
+    ```
+    sub_topics、pub_topics
+    ```
+- DBO 测试矩阵
     ```
     固定路径: .\data\matrix\dbc_lin_matrix.dbo
     ```
-- DDS idl文件
+- DDS SOA矩阵
     ```
-    固定路径: .\data\matrix\idl.xml
+    固定路径: .\data\matrix\rti_xxx.xml
     ```
 - 测试用例路径
     ```
     默认路径: .\data\case
+    ```
+- 同信号不同Topic
+    ```
+   signals_one2many： 如果SOA idl矩阵中存在不同topic下信号名相同的情况，则将此类型的信号名放到yaml配置文件中进行维护
+   自动/手动测试输入（输出）信号中，此信号名加topic的后缀，格式变更为 signal_name_[topic_name]_
+   signals_one2many:
+    - srv_control_source_
+    - srv_request_id_
+    - srv_time_
+    - msg_rr_acblow_vol_fdbk_
+    - msg_blwr_vol_fdbk_
+    - msg_en_clnt_temp_
     ```
 - 测试报告路径
     ```
@@ -66,26 +82,6 @@ Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (
     PassContions字段中信号定义:
     Pub_, Sub_, Recv_: 均表示接收被测对象发来的消息
     sql3_: 用于比较vcs数据库中存储的信号，要获取当前最新的信号值则需要在Actions中通过 sql3_switch动作触发
-    ```
-
-## 测试执行
-测试开始时程序会自动更新当前dbo矩阵配置，检测与自动部署sil服务到目标系统中，无需手动操作
-
-1. 检查当前dds矩阵文件是否适配
-    ```
-    .\data\matrix\idl.xml
-    ```
-2. 维护当前dds环境变量（不能漏写,可以多写）
-    ```
-    settings.py -> sub_topics、pub_topics 
-    ```
-3. 维护当前用例集路径（默认该文件夹下的所有用例）
-    ```
-    settings.py -> case_dir
-    ```
-4. 执行测试脚本（注意脚本是unittest框架）
-    ```
-    python ./test_sil_xbp.py
     ```
 
 ## 测试结果

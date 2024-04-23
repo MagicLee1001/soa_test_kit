@@ -11,12 +11,12 @@ import datetime
 import time
 from settings import env
 from runner.tester import CaseTester, TestHandle, CaseParser, TestPrecondition, TestPostCondition
-from runner.remote import MODULE_ID_MAPPING, CASE_MAPPING
-from loguru import logger
+from runner.log import logger
 from runner import run_tests_output_html_report
-from connector.dds import DDSConnector
+from connector.dds import DDSConnector, DDSConnectorRti
 from connector.sdc import SDCConnector
 from connector.ssh import SSHConnector
+from runner.simulator import DoIPMonitorThread
 
 
 def load_ddt_testcase(tc_filenames):
@@ -43,6 +43,10 @@ def load_ddt_testcase(tc_filenames):
 
 
 class TestSiLXBP(unittest.TestCase):
+    def setUp(self):
+        if getattr(env, 'stop_autotest', True):
+            self.skipTest("Global flag requests stop of the tests.")
+
     def test_sil_xbp(self):
         # 执行测试集
         logger.info(f'*********** env.ddt_test_index: {env.ddt_test_index}')
@@ -59,13 +63,17 @@ class TestSiLXBP(unittest.TestCase):
         # 执行一条测试集的所有测试用例
         logger.info(f'执行测试用例集: {test_filename}')
         for testcase in testcases:
+            # 检查全局标志位是否指示停止测试
+            if getattr(env, 'stop_autotest', True):
+                logger.info('Stopping test due to global flag.')
+                break  # 退出循环
             tc_name = testcase.get('case_name')
             test_method_name = self.__getattribute__('_testMethodName') + f'_{tc_name}'
             tc_steps = testcase.get('case_info')
             tc_title = testcase.get('case_title')
             # 远程用例执行状态更新 Running
             if env.remote_callback:
-                module_id = CASE_MAPPING.get(tc_filepath)
+                module_id = env.case_mapping.get(tc_filepath)
                 env.remote_callback.update_case_callback(module_id, tc_name)
             try:
                 # 执行一条测试用例
@@ -76,7 +84,7 @@ class TestSiLXBP(unittest.TestCase):
                 TestHandle.error_num += 1
                 result_mark = '🟡'
                 if env.remote_callback:
-                    module_id = CASE_MAPPING.get(tc_filepath)
+                    module_id = env.case_mapping.get(tc_filepath)
                     env.remote_callback.case_callback(module_id, tc_name, 'Fail')
             else:
                 # 每一个suite之间打印跑失败的信息
@@ -86,13 +94,13 @@ class TestSiLXBP(unittest.TestCase):
                     TestHandle.fail_num += 1
                     result_mark = '🔴'
                     if env.remote_callback:
-                        module_id = CASE_MAPPING.get(tc_filepath)
+                        module_id = env.case_mapping.get(tc_filepath)
                         env.remote_callback.case_callback(module_id, tc_name, 'Fail')
                 else:
                     TestHandle.pass_num += 1
                     result_mark = '🟢'
                     if env.remote_callback:
-                        module_id = CASE_MAPPING.get(tc_filepath)
+                        module_id = env.case_mapping.get(tc_filepath)
                         env.remote_callback.case_callback(module_id, tc_name, 'Pass')
                 env.tester.test_info = {}
                 result = tc_ret & result
@@ -116,8 +124,8 @@ def qt_main():
     result, report_path = run_tests_output_html_report(
         tests,
         report_dir,
-        case_name='SOA_SiL',
-        html_report_title='AutoLi_SOA_SiL_测试报告',
+        case_name='SOA_ACore_SiL',
+        html_report_title='AutoLi SOA ACore SiL Testreport',
         description='',
         tester='',
     )
@@ -129,21 +137,21 @@ def set_test_handle():
     # 飞书报告通知变量
     TestHandle.start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     TestHandle.case_seq = 1
-    TestHandle.report_dir=''
+    TestHandle.report_dir = ''
     TestHandle.report_html_path = ''
-    TestHandle.template_bg=''
-    TestHandle.cost_time='0 s'
-    TestHandle.total_num=0
-    TestHandle.pass_num=0
-    TestHandle.fail_num=0
-    TestHandle.error_num=0
-    TestHandle.pass_rate='0%'
-    TestHandle.test_detail=''
+    TestHandle.template_bg = ''
+    TestHandle.cost_time = '0 s'
+    TestHandle.total_num = 0
+    TestHandle.pass_num = 0
+    TestHandle.fail_num = 0
+    TestHandle.error_num = 0
+    TestHandle.pass_rate = '0%'
+    TestHandle.test_detail = ''
     TestHandle.notice_url = env.notice_base_url + env.notice_path
     TestHandle.chat_id = env.notice_chat_id
     TestHandle.card_temp_id = env.notice_temp_id
     TestHandle.vin = env.ssh_connector.get_vin()
-    TestHandle.case_name = 'SOA_SiL_TEST'
+    TestHandle.case_name = 'SOA_SiL_XBP_TEST'
     TestHandle.title = 'AutoLi-测试报告'
     TestHandle.result_str = '✔ 通过'
     # QT变量
@@ -157,13 +165,15 @@ def set_env_tester():
     # ssh connector要先启动
     env.ssh_connector = SSHConnector(hostname=env.ssh_hostname, username=env.ssh_username, password=env.ssh_password)
     env.sdc_connector = SDCConnector(env.dbo_filepath, server_ip=env.sil_server_ip, server_port=env.sil_server_port)
-    env.dds_connector = DDSConnector(idl_filepath=env.idl_filepath)
+    env.dds_connector = DDSConnectorRti(idl_filepath=env.idl_filepath) if 'rti_' in env.idl_filepath else DDSConnector(idl_filepath=env.idl_filepath)
+    env.doip_simulator = DoIPMonitorThread()
     env.tester = CaseTester(
         sub_topics=env.sub_topics,
         pub_topics=env.pub_topics,
         sdc_connector=env.sdc_connector,
         dds_connector=env.dds_connector,
-        ssh_connector=env.ssh_connector
+        ssh_connector=env.ssh_connector,
+        doip_simulator=env.doip_simulator
     )
 
 

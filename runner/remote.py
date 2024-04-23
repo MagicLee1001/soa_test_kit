@@ -8,11 +8,12 @@ import os
 import shutil
 import socket
 import threading
+import time
 import traceback
 import urllib.parse
 import requests
 import svn.utility
-from loguru import logger
+from runner.log import logger
 from settings import env
 
 # 云端执行
@@ -21,10 +22,6 @@ CURRENT_MODULE_ID = ''
 SERVER_ADDRESS = ''
 TASK_ID = ''
 DISTRIBUTE_ID = ''
-# Id 名字的映射
-MODULE_ID_MAPPING = {}
-# 用例和模块的映射
-CASE_MAPPING = {}
 
 
 def pc_name():
@@ -120,7 +117,7 @@ class Run(object):
         for root in res_data['data']:
             group_id = root.get('groupId')
             group_name = root.get('groupName')
-            MODULE_ID_MAPPING[group_id] = group_name
+            env.module_id_mapping[group_id] = group_name
             run_time = root.get('runTime')
             if run_time is None:
                 run_time = 1
@@ -132,7 +129,7 @@ class Run(object):
             self.export_svn_group(group_svn_url, group_order_path, run_time)
             get_suffix_file(group_order_path, 'xlsm', case_files)
             for case_file in case_files:
-                CASE_MAPPING[case_file] = group_id
+                env.case_mapping[case_file] = group_id
                 cases.append(case_file)
         # call_back = CallBack()
         # call_back.task_case_path(time_folder)
@@ -259,8 +256,8 @@ class CallBack:
             requests.post(SERVER_ADDRESS + '/caseRun/systemVersion',
                           json={'taskId': self.task_id, 'distributeId': self.distribute_id, 'xcu_info': xcu_info})
             res = requests.get(SERVER_ADDRESS + '/caseRun/taskResultCallback',
-                               params={'taskId': self.task_id, 'baseLine': xcu_info['xcu_baseline'],
-                                       'coreVersion': xcu_info['acore_app'], 'logPath': ois_path,
+                               params={'taskId': self.task_id, 'baseLine': xcu_info['baseline_version'],
+                                       'coreVersion': xcu_info['apps_version'], 'logPath': ois_path,
                                        'distributeId': self.distribute_id})
             logger.info(u'task callback request test_manager result: ' + str(res))
         except Exception as e:
@@ -292,7 +289,7 @@ class CallBack:
         """
         更新用例执行结果
         """
-        module_name = MODULE_ID_MAPPING.get(module_id)
+        module_name = env.module_id_mapping.get(module_id)
         try:
             requests.get(SERVER_ADDRESS + '/caseRun/updateCase',
                          params={'taskId': self.task_id, 'caseName': case_name, 'moduleId': module_id,
@@ -314,17 +311,3 @@ class CallBack:
             logger.error('更新日志失败' + str(e))
             requests.get(env.remote_server + '/caseRun/caseLogResult',
                          params={'taskId': self.task_id, 'caseId': case_id, 'logPath': log_path})
-
-
-if __name__ == '__main__':
-    # resp = requests.get('https://xxx/caseRun/systemVersion',
-    #              json={'taskId': 'a', 'distributeId': '1', 'xcu_info': {"a": 1}})
-    # resp = requests.get('https://xxx/caseRun/task',
-    #              params={'taskId': '44b2be6e82d211eeb33d96a234d0dd88 ', 'distributeId': '2091'})
-    # print(resp.json())
-
-    run = Run(server='xxx',
-              task_id='44b2be6e82d211eeb33d96a234d0dd88',
-              distribute_id='2091')
-    cases, result_case_path = run.parse_case()
-    print(cases)

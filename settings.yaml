@@ -3,20 +3,21 @@ width: 900
 height: 600
 
 # cloud
-remote_server: [need_fill]
-svn_username: [need_fill]
-svn_password: [need_fill]
+remote_server: https://xxx.cloud
+svn_username: xxx
+svn_password: xxx
 
 # feishu
 notice_chat_id: oc_xxx
-notice_base_url: xxx/vvrobot
+notice_base_url: https://xxx/vvrobot
 notice_path: /hook/messages
-notice_temp_id: ctp_xxx
+notice_temp_id: ctp_AA8KJSxbvB8x
 
 # ssh
 ssh_hostname: 172.31.30.32
 ssh_username: root
 ssh_password: root
+local_net_segment: 172.31.30.166
 
 # sdc sil server
 sil_server_ip: 172.31.30.32
@@ -30,9 +31,9 @@ vcs_signal_table_name: config_store_int
 # local filepath
 result_dir: data\result
 ssh_key_filepath: data\key\xcu_rsa_ssh
-idl_filepath: data\matrix\XBP.xml
+idl_filepath: data\matrix\vbs_XBP1.2.0.xml
 dbo_filepath: data\matrix\dbc_lin_dbis_matrix.dbo
-sil_local_filepath: data\key\sil
+sil_local_filepath: data\key\sil_eea25
 sil_sdf_local_filepath: data\key\sil.sdf
 case_dir: data\case\debug
 
@@ -44,7 +45,41 @@ dbo_remote_filepath: /apps/x01/etc/sdc/dbc_lin_dbis_matrix.dbo
 # dds
 sub_topics:
   - ACSetStatus
+  - SetACWorkingModeRequest
+  - BodyWarning
+  - ThermalSystemDisplay
+  - PowertrainSystemStatus
+  - SeatBeltBuckle
+  - SecondAndThirdRowSeatOccupyingStatus
+  - FrontSeatOccupiedStatus
+  - RoadModeStatus
+  - DriveModeSts
+  - EnergyModeStatus
+  - TractionModeSts
+  - EPSModeSts
   - BrakeSystemStatus
+  - PowertrainSystemStatus
+  - HVOFStatus
+  - ThermalSystemDisplay
+  - SpecialModeState
+  - ControlVehicleDriveSystemStateRequest
+  - ControlVehicleGearRequest
+  - ControlEPBRequest
 
 pub_topics:
   - ACSetStatus
+  - SetACWorkingModeRequest
+  - FrontSeatOccupiedStatus
+  - ControlRoadModeRequest
+  - ControlDriveModeRequest
+  - ControlEnergyModeRequest
+  - ControlTractionModeRequest
+  - SetSteeringSystemRequest
+  - ICInfoStatus
+  - VehicleDriveState
+  - VehicleGearState
+  - VehicleDriveSystemStateOutput
+  - TractionModeSts
+  - HUWorkModeInfo
+  - ControlSpecialModeRequest
+  - ControlHVOFRequest

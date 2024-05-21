@@ -3,13 +3,13 @@ width: 900
 height: 600
 
 # cloud
-remote_server: https://xxx.cloud
+remote_server: https://test-manager.ontest.k8s.chj.cloud
 svn_username: xxx
 svn_password: xxx
 
 # feishu
-notice_chat_id: oc_xxx
-notice_base_url: https://xxx/vvrobot
+notice_chat_id: oc_9595c250eabd2767fb622a0de7c3a236
+notice_base_url: https://iot-openapi-dev.chehejia.com/vvrobot
 notice_path: /hook/messages
 notice_temp_id: ctp_AA8KJSxbvB8x
 

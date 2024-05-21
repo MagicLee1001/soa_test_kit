@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun19941001@163.com
 # @Time    : 2024/3/29 14:15
 # @File    : worker.py
 
@@ -7,11 +8,14 @@ import os
 import time
 import json
 import traceback
+import random
+from copy import deepcopy
 from runner.log import logger
 from PyQt5 import QtCore
-from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtCore import pyqtSignal, QDateTime
 from PyQt5.Qt import QThread, QObject
 from settings import env
+from runner.variable import Variable
 from connector.sdc import SDCConnector
 from connector.dds import DDSConnector, DDSConnectorRti
 from runner.tester import CaseTester, TestPrecondition, TestPostCondition, TestHandle
@@ -109,10 +113,40 @@ class ReloadSettingWorker(QThread):
             # 更新ssh信号矩阵
             tpr.start_ssh_connector()
             # 更新dds writer与reader池
+            tpr.verify_topic_correctness()
             tpr.start_dds_connector()
             # 重新连接sil server
             env.sdc_connector.reconnect_server()
             logger.success('环境配置更新完成')
+        except:
+            logger.error(traceback.format_exc())
+
+
+class DeploySilNode(QThread):
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
+        self.app = parent
+
+    def run(self):
+        try:
+            env.tester.ssh_connector.put_sil_server()
+            # 如果已经启动了 会抛出 RuntimeError("threads can only be started once")异常
+            if not env.tester.sdc_connector.started:
+                env.tester.sdc_connector.start()
+            logger.success('完成sil仿真节点部署')
+        except:
+            logger.error(traceback.format_exc())
+
+
+class UndeploySilNode(QThread):
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+
+    def run(self):
+        try:
+            env.tester.ssh_connector.recover_sil_environment(recover_vcs=False, recover_sdc=False)
+            logger.success('完成sil仿真节点移除')
         except:
             logger.error(traceback.format_exc())
 
@@ -138,24 +172,17 @@ class ModifyConfigWordWorker(QThread):
 
 class RecoverEnvironment(QThread):
     """ 测试环境还原线程"""
-    enable_recover_tool_signal = pyqtSignal(bool)
-
     def __init__(self, app):
         super().__init__()
         self.app = app
-        self.enable_recover_tool_signal.connect(self.app.recover_tool.setEnabled)
 
     def run(self) -> None:
         try:
             # 发送信号以使按钮置灰（False代表不可用）
-            self.enable_recover_tool_signal.emit(False)
             # 执行恢复操作
             env.tester.ssh_connector.recover_sil_environment()
         except:
             logger.error(traceback.format_exc())
-        finally:
-            # 恢复过程完成后，发送信号以使按钮可用（True代表可用）
-            self.enable_recover_tool_signal.emit(True)
 
 
 class ReleaseWorker(QThread):
@@ -217,3 +244,32 @@ class LowCaseTransWorker(QThread):
     def run(self):
         paths = HandleTestCaseFile.lowercase_trans(self.source_path, save_dir=self.save_dir)
         self.display_paths_signal.emit(paths)  # 发出显示最新用例路径的信号
+
+
+class DDSFuzzTest(QThread):
+    def __init__(self, end_time=None):
+        super().__init__()
+        self.end_time = end_time
+        self.running = True
+
+    def run(self):
+        logger.info(f'DDS模糊测试开始, 预计结束时间: {self.end_time.toString("yyyy-MM-dd HH:mm:ss")}')
+        try:
+            signals = Variable.get_all_signals()
+            while self.running:
+                for signal_obj in signals:
+                    signal_obj.Value = float(random.randint(0, 2 ** 8 - 1))
+                    try:
+                        env.tester.dds_connector.dds_send(signal_obj)
+                    except:
+                        pass
+                time.sleep(1)
+                if self.end_time and QDateTime.currentDateTime() >= self.end_time:
+                    break
+        except:
+            logger.error(f'DDS模糊测试执行异常: {traceback.format_exc()}')
+        logger.info('DDS模糊测试结束')
+
+    def stop(self):
+        self.running = False
+

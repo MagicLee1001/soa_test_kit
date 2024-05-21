@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun3@lixiang.com
 # @Time    : 2023/10/24 11:15
 # @File    : test_sil_xbp.py
 
@@ -151,7 +152,7 @@ def set_test_handle():
     TestHandle.chat_id = env.notice_chat_id
     TestHandle.card_temp_id = env.notice_temp_id
     TestHandle.vin = env.ssh_connector.get_vin()
-    TestHandle.case_name = 'SOA_SiL_XBP_TEST'
+    TestHandle.case_name = 'SOA-A核软件在环仿真测试'
     TestHandle.title = 'AutoLi-测试报告'
     TestHandle.result_str = '✔ 通过'
     # QT变量

@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun3@lixiang.com
 # @Time    : 2023/11/1 16:50
-# @File    : soa_test_kit.py
+# @File    : sil_xbp.py
+
 
 import os
 import sys
@@ -40,11 +42,11 @@ from runner.remote import Run, CallBack
 from runner.simulator import DoIPMonitorThread, VehicleModeDiagnostic
 from ui.worker import (
     AutoTestWorker, ReloadSettingWorker, RecoverEnvironment, ModifyConfigWordWorker, ReleaseWorker, GenTestCaseWorker,
-    LowCaseTransWorker
+    LowCaseTransWorker, DeploySilNode, UndeploySilNode, DDSFuzzTest
 )
 from ui.widgets import (
     CustomListWidget, CustomTableWidget, CustomTabBar, PopupView, ErrorDialog, CustomerLogArea, ECUSelectionDialog,
-    CustomSplashScreen
+    CustomSplashScreen, SilConnectionLabel, DDSFuzzDatePickerDialog
 )
 from ui.startup import PlatformConfigurationDialog
 
@@ -54,14 +56,19 @@ QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
 QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
 # 软件版本号
-__version__ = '24.4.23'
+__version__ = '24.5.13.beta-1.1'
 
 
 class MainWindow(QMainWindow):
     def __init__(self, backend_thread=None):
         super().__init__()
+        self.sil_connection_light = {
+            0: '🔴 sil 未部署',
+            1: '🟢 sil 已连接',
+            2: '🟡 sil 连接中断 重连中...'
+        }
         self.q_backend_thread = backend_thread
-        self.current_doip_env_mode = None
+        self.current_doip_env_mode = 0
         case_filenames = TestHandle.get_filename_from_dir(env.case_dir, 'xlsm')
         self.case_filepaths = [os.path.join(env.case_dir, case_filename) for case_filename in case_filenames]
         # 初始化主窗口和菜单栏
@@ -135,6 +142,10 @@ class MainWindow(QMainWindow):
         self.footer_widget = QWidget()
         self.footer_layout = QHBoxLayout()
         self.footer_widget.setLayout(self.footer_layout)
+        self.sil_connection_label = SilConnectionLabel(self, f'{self.sil_connection_light[env.sil_node_status]}')
+        self.sil_connection_label.setAlignment(Qt.AlignCenter)
+        self.footer_layout.addWidget(self.sil_connection_label)
+        self.footer_layout.addStretch(1)  # 插入一个弹性空间
         self.status_label = QLabel('')
         self.status_label.setAlignment(Qt.AlignLeft)
         self.footer_layout.addWidget(self.status_label)
@@ -163,6 +174,12 @@ class MainWindow(QMainWindow):
         self.timer_home = QTimer(self)
         self.timer_home.timeout.connect(self.set_auto_run_text)
         self.timer_home.setInterval(500)
+        # 初始化显示sil仿真连接情况
+        self.display_sil_connection = QTimer(self)
+        self.display_sil_connection.timeout.connect(
+            lambda: self.sil_connection_label.setText(f'{self.sil_connection_light[env.sil_node_status]}')
+        )
+        self.display_sil_connection.start(1000)
         # 自动化测试线程 禁用和解禁一些按钮
         self.auto_test_worker = AutoTestWorker(self)
         self.auto_test_worker.started.connect(self.on_auto_test_start)
@@ -177,12 +194,27 @@ class MainWindow(QMainWindow):
         self.modify_cw_worker.finished.connect(self.set_sw_info_text)
         # 恢复环境线程
         self.recover_env_task = RecoverEnvironment(self)
+        self.recover_env_task.started.connect(lambda: self.recover_tool.setEnabled(False))
         self.recover_env_task.started.connect(lambda: self.status_label.setText("🟡 正在还原当前测试环境为正常环境，请稍后..."))
         self.recover_env_task.finished.connect(lambda: self.recover_tool.setEnabled(True))
         self.recover_env_task.finished.connect(self.on_handle_task_finished)
         # 资源释放线程
         self.release_work = ReleaseWorker(self)
         self.release_work.finished.connect(self.on_cleanup_finished)
+        # 部署sil-node线程
+        self.deploy_sil_node_task = DeploySilNode(self)
+        self.deploy_sil_node_task.started.connect(lambda: self.recover_tool.setEnabled(False))
+        self.deploy_sil_node_task.started.connect(lambda: self.status_label.setText("🟡 正在部署sil仿真节点，请稍后..."))
+        self.deploy_sil_node_task.finished.connect(lambda: self.recover_tool.setEnabled(True))
+        self.deploy_sil_node_task.finished.connect(self.on_handle_task_finished)
+        # 移除sil-node线程
+        self.undeploy_sil_node_task = UndeploySilNode(self)
+        self.undeploy_sil_node_task.started.connect(lambda: self.recover_tool.setEnabled(False))
+        self.undeploy_sil_node_task.started.connect(lambda: self.status_label.setText("🟡 正在移除sil仿真节点，请稍后..."))
+        self.undeploy_sil_node_task.finished.connect(lambda: self.recover_tool.setEnabled(True))
+        self.undeploy_sil_node_task.finished.connect(self.on_handle_task_finished)
+        # dds模糊测试线程
+        self.dds_fuzz_thread = None
         # 创建一个手动调试页
         logger.info('创建手动调试页')
         self.add_tab()
@@ -238,6 +270,43 @@ class MainWindow(QMainWindow):
         # 添加车模式仿真ECU配置菜单选项
         vehicle_mode_ecu_menu = tool_menu.addAction('车辆模式ECU选择')
         vehicle_mode_ecu_menu.triggered.connect(self.show_vehicle_mode_ecu_selection)
+
+        # 添加dds模糊测试任务开关
+        dds_fuzz_menu = tool_menu.addMenu('DDS模糊测试')
+        self.dds_fuzz_start_action = QAction('启动', self)
+        self.dds_fuzz_start_action.triggered.connect(self.show_dds_fuzz_datetime_dialog)
+        self.dds_fuzz_stop_action = QAction('停止', self)
+        self.dds_fuzz_stop_action.setEnabled(False)
+        self.dds_fuzz_stop_action.triggered.connect(self.stop_dds_fuzz)
+        dds_fuzz_menu.addAction(self.dds_fuzz_start_action)
+        dds_fuzz_menu.addAction(self.dds_fuzz_stop_action)
+
+    def show_dds_fuzz_datetime_dialog(self):
+        self.datetime_picker_dialog = DDSFuzzDatePickerDialog(self)
+        self.datetime_picker_dialog.datetime_selected.connect(self.start_dds_fuzz)
+        self.datetime_picker_dialog.exec_()
+
+    def start_dds_fuzz(self, end_time):
+        self.dds_fuzz_start_action.setEnabled(False)
+        self.dds_fuzz_stop_action.setEnabled(True)
+        self.dds_fuzz_thread = DDSFuzzTest(end_time)
+        self.dds_fuzz_thread.started.connect(
+            lambda: self.status_label.setText(
+                f"🟡 正在执行dds模糊测试 截止时间: {end_time.toString('yyyy-MM-dd HH:mm:ss')} ..."
+            )
+        )
+        self.dds_fuzz_thread.finished.connect(self.dds_fuzz_finished)
+        self.dds_fuzz_thread.finished.connect(self.on_handle_task_finished)
+        self.dds_fuzz_thread.start()
+
+    def stop_dds_fuzz(self):
+        if self.dds_fuzz_thread and self.dds_fuzz_thread.isRunning():
+            self.dds_fuzz_thread.stop()
+
+    def dds_fuzz_finished(self):
+        self.dds_fuzz_thread = None
+        self.dds_fuzz_start_action.setEnabled(True)
+        self.dds_fuzz_stop_action.setEnabled(False)
 
     def recover_environment(self):
         self.recover_tool.setEnabled(False)
@@ -353,7 +422,7 @@ class MainWindow(QMainWindow):
         # 移除提示信息
         self.status_label.setText('')
         # 显示任务完成的信息框
-        QMessageBox.information(self, "完成", "任务执行完成！")
+        # QMessageBox.information(self, "完成", "任务执行完成！")
 
     def show_vehicle_mode_ecu_selection(self):
         # 在点击时显示对话框
@@ -533,7 +602,7 @@ class MainWindow(QMainWindow):
                 if signal_name and value != '':
                     try:
                         signal = Variable(signal_name)
-                        signal_value = CaseTester.convert_to_float(value)
+                        signal_value = CaseTester.convert_signal_value(value)
                         if signal_value is None:
                             raise Exception(f'{signal.name}={signal_value} value convert error')
                         # if signal.data_array[-1] != signal_value:  # 当前值有修改则发送, 2024.02.20 沟通需求确认均发送
@@ -1099,8 +1168,10 @@ def main():
         except:
             logger.error(traceback.format_exc())
 
+    # 初始化App和 MainWindow
     app = SafeApplication(sys.argv)
     main_window = MainWindow()
+
     # 运行平台选择对话框
     dialog = PlatformConfigurationDialog()
     if dialog.exec_() != QDialog.Accepted:

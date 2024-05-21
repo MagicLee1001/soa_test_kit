@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun19941001@163.com
 # @Time    : 2023/10/23 11:18
 # @File    : tester.py
 
@@ -12,6 +13,7 @@ import traceback
 import requests
 import math
 import threading
+from json.decoder import JSONDecodeError
 from openpyxl import load_workbook
 from prettytable import PrettyTable
 from runner.log import logger
@@ -297,23 +299,12 @@ class TestPrecondition:
     """
     初始化connector的连接，包括拉齐、部署，需要抛出异常给QSplash捕获失败弹窗
     """
+
     def __init__(self, tester, callback=None):
         self.tester = tester
         self.callback = callback  # pyqt progress信号
 
-    def start_sdc_connector(self):
-        if self.callback:
-            self.callback.emit('sdc接收器 启动tcp接收线程 ...')
-        logger.info('>>> sdc接收器 启动tcp接收线程 ...')
-        self.tester.sdc_connector.start()
-        time.sleep(1)
-
-    def start_dds_connector(self):
-        """
-        dds connector订阅与发布池启动
-        Bug to fix: 先发布后启动，部分Topic如 ACSetStatus中的信号无法正常接受
-        这一块以后再分析原因
-        """
+    def verify_topic_correctness(self):
         # 先判断用户给的topic列表在不在矩阵中
         if self.callback:
             self.callback.emit('检查所给topic名称是否符合矩阵要求 ...')
@@ -328,13 +319,28 @@ class TestPrecondition:
                 not_matched_pub_topics.append(i)
         if not_matched_sub_topics or not_matched_pub_topics:
             raise Exception(
-                f'topic名称未在矩阵当中, 请重新配置yaml文件, 检查并给出正确的Topic: \n'
-                f'不符合要求的订阅Topic: {", ".join(not_matched_sub_topics)}\n'
-                f'不符合要求的发布Topic: {", ".join(not_matched_pub_topics)}'
+                f'topic名称未在矩阵当中, 请重新配置yaml文件, 检查并给出正确的Topic\n'
+                f'---------------------------------------------------------\n'
+                f'订阅Topic: {", ".join(not_matched_sub_topics)}\n\n'
+                f'发布Topic: {", ".join(not_matched_pub_topics)}'
             )
         else:
             logger.success('配置文件topic名称检查通过')
 
+    def start_sdc_connector(self):
+        if self.callback:
+            self.callback.emit('sdc接收器 连接sil仿真节点并接收tcp消息 ...')
+        self.tester.sdc_connector.connect_server()
+        self.tester.sdc_connector.start()
+        logger.info('>>> sdc接收器 启动tcp接收线程 ...')
+        time.sleep(1)
+
+    def start_dds_connector(self):
+        """
+        dds connector订阅与发布池启动
+        Bug to fix: 先发布后启动，部分Topic如 ACSetStatus中的信号无法正常接受
+        这一块以后再分析原因
+        """
         if self.callback:
             self.callback.emit('dds订阅器 启动订阅线程池 ...')
         logger.info('>>> dds订阅器 启动订阅线程池 ...')
@@ -374,6 +380,7 @@ class TestPrecondition:
         self.tester.doip_simulator.start()
 
     def run(self):
+        self.verify_topic_correctness()
         self.start_ssh_connector()
         self.start_sdc_connector()
         self.start_dds_connector()
@@ -422,9 +429,11 @@ class CaseTester:
         self.ssh_connector = ssh_connector
         self.doip_simulator = doip_simulator  # 新增UDS仿真
         self.test_info = {}
+        self.non_dds_prefix = ('SIL_VMS_', 'sql3_switch', 'sql3_write_', 'A2M_', 'M2A_', 'ssh_exec_cmd',
+                               'ssh_interactive_cmd', 'ssh_exec_output')  # 非dds消息格式
 
     @staticmethod
-    def convert_to_float(value):
+    def convert_signal_value(value):
         """
         数据类型转换
         :param value:
@@ -444,37 +453,56 @@ class CaseTester:
                 logger.error('转换十六进制失败')
         else:
             try:
-                decimal_value = float(value)
-                return decimal_value
+                return float(value)
             except ValueError:
-                # logger.error('转换十进制失败')
-                return value
-            # return None
+                try:
+                    return json.loads(value.replace('\n', ''))
+                except JSONDecodeError:
+                    return value
 
     def send_single_msg(self, signal):
-        # if signal.name.startswith('SRV_') or signal.name.startswith('MSG_'):  # 发DDS信号给被测对象
-        if re.match("^(SRV_|MSG_|srv_|msg_)", signal.name):  # 发DDS信号给被测对象
-            self.dds_connector.dds_send(signal)
-        elif signal.name.startswith('M2A_'):  # 发M2A TCP信号给被测对象
-            self.sdc_connector.tcp_send(signal)
-        elif signal.name.startswith('sql3_switch'):  # 操作vcs数据库
+        # 用例默认信号 起填充作用 无实际意义
+        if signal.name in ['Sw_HandWakeup', 'SIL_Client_CnnctSt', 'SIL_Client_Cnnct']:
+            Variable(signal.name).Value = 1
+        # 车辆模式ECU仿真状态
+        elif signal.name.startswith('SIL_VMS_'):
+            logger.info(f'设置车辆模式ECU仿真: {signal.name} = {signal.Value}')
+            VehicleModeDiagnostic.set_state(signal.name[8:], signal.Value)
+        # 操作vcs数据库
+        elif signal.name.startswith('sql3_switch'):
             self.ssh_connector.get_vsc_db_signals()
-        elif signal.name.startswith('sql3_write_'):  # 操作vcs数据库
+        # 操作vcs数据库
+        elif signal.name.startswith('sql3_write_'):
             set_signal_name = signal.name.lstrip('sql3_write_')
             self.ssh_connector.set_vsc_db_signal(
                 signal_name=set_signal_name,
                 signal_value=signal.Value
             )
-        elif signal.name in ['Sw_HandWakeup', 'SIL_Client_CnnctSt']:  # 用例默认信号 起填充作用 无实际意义
-            Variable('SIL_Client_CnnctSt').Value = 1
-        elif signal.name.startswith('A2M_'):  # 用例中要更改现有的全局变量 不作发送
-            logger.info(f'修改全局A2M_信号 {signal.name} = {signal.Value}')
+        # 用例中要更改现有的全局变量 不作发送
+        elif signal.name.startswith('A2M_'):
+            logger.info(f'修改全局A2M_信号: {signal.name} = {signal.Value}')
             Variable(signal.name).Value = signal.Value
-        elif signal.name.startswith('SIL_VMS_'):  # 车辆模式ECU仿真状态
-            logger.info(f'设置车辆模式ECU仿真: {signal.name} = {signal.Value}')
-            VehicleModeDiagnostic.set_state(signal.name[8:], signal.Value)
+        # 发M2A TCP信号
+        elif signal.name.startswith('M2A_'):
+            self.sdc_connector.tcp_send(signal)
+        # 执行ssh终端命令
+        elif signal.name.startswith('ssh_exec_cmd'):
+            logger.info(f'执行ssh命令: {signal.name} = {signal.Value}')
+            output = self.ssh_connector.execute_cmd(signal.Value, console=True)
+            Variable('ssh_exec_output').Value = output
+        elif signal.name.startswith('ssh_interactive_cmd'):
+            logger.info(f'执行ssh交互式命令: {signal.name} = {signal.Value}')
+            output = self.ssh_connector.execute_interact_cmd(signal.Value)
+            logger.info(output)
+        # 无实际意义
+        elif signal.name.startswith('ssh_exec_output'):
+            pass
+        # 发DDS信号
         else:
-            raise Exception(f'SignalFormatError: {signal.name}')
+            if not Variable.check_existence(signal.name):
+                raise Exception(f'SignalFormatError: {signal.name}')
+            else:
+                self.dds_connector.dds_send(signal)
 
     def run_test_case(self, tc_name, test_steps, tc_title=''):
         tc_ret = True
@@ -489,111 +517,97 @@ class CaseTester:
             # action 输入
             action_pass = True
             for action in step.actions:
-                if action is not None and action != '' and action != 'None':
-                    action = str(action).replace(' ', '').replace(';', '')
-                    if '==' in str(action):
-                        action = str(action).replace('==', '=')
-
+                if action and action != 'None':
+                    action = str(action)
+                    if 'ssh_' not in action:  # ssh命令可能会有空格或其他符号
+                        action = action.replace(' ', '').replace('==', '=').replace(';', '')
                     # 判断是不是一组dds消息 (目前一组消息用&&连接，只有DDS和车模式仿真开关支持)
-                    if '&&' in action:
-                        multi_msg = str(action).strip().split('&&')
-                        signals = []
-                        topic_name = ''
-                        for msg in multi_msg:
-                            _m = msg.split('=')
-                            sigal_name_str = _m[0]
-                            # 判断是不是dds消息格式
-                            if not any(
-                                    sigal_name_str.startswith(prefix) for prefix in (
-                                        'MSG_', 'SRV_', 'SIL_VMS_', 'srv_', 'msg_'
-                                    )
-                            ):
-                                fail_reason = f'SignalFormatError: {sigal_name_str}'
-                                if fail_reason not in step_evaluation:
-                                    step_evaluation.append(fail_reason)
-                                logger.error(f'Multi signals should be dds format: {sigal_name_str}')
-                                action_pass = False
-                                break
-                            # 根据信号名查找全局信号，判断是否存在
-                            has_such_signal = Variable.check_existence(sigal_name_str)
-                            if not has_such_signal:
-                                fail_reason = f'SignalNotFound: {sigal_name_str}'
-                                if fail_reason not in step_evaluation:
-                                    step_evaluation.append(fail_reason)
-                                logger.error(f'Actions not found signal {sigal_name_str}')
-                                action_pass = False
-                                break
-                            else:
-                                try:
-                                    signal = Variable(sigal_name_str)
-                                    # 添加DDS信号组
-                                    if any(
-                                        signal.name.startswith(prefix) for prefix in (
-                                                'MSG_', 'SRV_', 'srv_', 'msg_'
-                                        )
-                                    ):
-                                        tpn = self.dds_connector.signal_map[signal.name]
-                                        if topic_name and topic_name != tpn:
-                                            raise Exception(f'SignalsTopicNotSame')
-                                        else:
-                                            topic_name = tpn
-                                        if signal.name in ['srv_res_chrg_end_times_', 'srv_res_chrg_star_times_']:
-                                            # 这俩信号是string
-                                            signal_value = _m[1]
-                                        else:
-                                            # 其余信号均可处理成number
-                                            signal_value = CaseTester.convert_to_float(_m[1])
-                                        if signal_value is None:
-                                            logger.error(f'Signal {signal.name} value {signal_value}convert error')
-                                            raise Exception(f'Signal {signal.name} value {signal_value}convert error')
-                                        signal.Value = signal_value
-                                        signals.append(signal)
+                    # 2024-05-15 取消一组消息发送规则
+                    # if '&&' in action:
+                    #     multi_msg = str(action).strip().split('&&')
+                    #     signals = []
+                    #     topic_name = ''
+                    #     for msg in multi_msg:
+                    #         _m = msg.split('=')
+                    #         sigal_name_str = _m[0]
+                    #         # 判断是不是dds消息格式
+                    #         if any(sigal_name_str.startswith(prefix) for prefix in self.non_dds_prefix):
+                    #             fail_reason = f'SignalFormatError: {sigal_name_str}'
+                    #             if fail_reason not in step_evaluation:
+                    #                 step_evaluation.append(fail_reason)
+                    #             logger.error(f'Multi signals should be dds format: {sigal_name_str}')
+                    #             action_pass = False
+                    #             break
+                    #         # 根据信号名查找全局信号，判断是否存在
+                    #         has_such_signal = Variable.check_existence(sigal_name_str)
+                    #         if not has_such_signal:
+                    #             fail_reason = f'SignalNotFound: {sigal_name_str}'
+                    #             if fail_reason not in step_evaluation:
+                    #                 step_evaluation.append(fail_reason)
+                    #             logger.error(f'Actions not found signal {sigal_name_str}')
+                    #             action_pass = False
+                    #             break
+                    #         else:
+                    #             try:
+                    #                 signal = Variable(sigal_name_str)
+                    #                 # 添加DDS信号组
+                    #                 if not any(signal.name.startswith(prefix) for prefix in self.non_dds_prefix):
+                    #                     tpn = self.dds_connector.signal_map[signal.name]
+                    #                     if topic_name and topic_name != tpn:
+                    #                         raise Exception(f'SignalsTopicNotSame')
+                    #                     else:
+                    #                         topic_name = tpn
+                    #                     signal_value = CaseTester.convert_signal_value(_m[1])
+                    #                     if signal_value is None:
+                    #                         logger.error(f'Signal {signal.name} value {signal_value}convert error')
+                    #                         raise Exception(f'Signal {signal.name} value {signal_value}convert error')
+                    #                     signal.Value = signal_value
+                    #                     signals.append(signal)
+                    #
+                    #                 # 添加车模式仿真信号组
+                    #                 elif signal.name.startswith('SIL_VMS_'):
+                    #                     signal.Value = float(_m[1])  # 字符串类型转成整型
+                    #                     self.send_single_msg(signal)
+                    #
+                    #             except Exception as e:
+                    #                 if str(e) not in step_evaluation:  # 防止原因重复
+                    #                     step_evaluation.append(str(e))
+                    #                 logger.error("Actions error: " + str(e))
+                    #                 action_pass = False
+                    #                 break
+                    #     # 发送一组dds消息
+                    #     if topic_name and signals:
+                    #         self.dds_connector.dds_multi_send(
+                    #             topic_name=topic_name,
+                    #             signals=signals
+                    #         )
 
-                                    # 添加车模式仿真信号组
-                                    elif signal.name.startswith('SIL_VMS_'):
-                                        signal.Value = float(_m[1])  # 字符串类型转成整型
-                                        self.send_single_msg(signal)
-
-                                except Exception as e:
-                                    if str(e) not in step_evaluation:  # 防止原因重复
-                                        step_evaluation.append(str(e))
-                                    logger.error("Actions error: " + str(e))
-                                    action_pass = False
-                                    break
-                        # 发送一组dds消息
-                        if topic_name and signals:
-                            self.dds_connector.dds_multi_send(
-                                topic_name=topic_name,
-                                signals=signals
-                            )
-
-                    # 非一组信号 单独发送
+                    # 单条消息发送处理逻辑
+                    msg = action.strip().split('=')
+                    sigal_name_str = msg[0].strip()
+                    has_such_signal = Variable.check_existence(sigal_name_str)
+                    if not has_such_signal:
+                        fail_reason = f'SignalNotFound: {sigal_name_str}'
+                        if fail_reason not in step_evaluation:
+                            step_evaluation.append(fail_reason)
+                        logger.error(f'Actions SignalNotFound {sigal_name_str}')
+                        action_pass = False
+                        break
                     else:
-                        msg = str(action).strip().split('=')
-                        sigal_name_str = msg[0]
-                        has_such_signal = Variable.check_existence(sigal_name_str)
-                        if not has_such_signal:
-                            fail_reason = f'SignalNotFound: {sigal_name_str}'
-                            if fail_reason not in step_evaluation:
-                                step_evaluation.append(fail_reason)
-                            logger.error(f'Actions SignalNotFound {sigal_name_str}')
+                        try:
+                            signal = Variable(sigal_name_str)
+                            signal_value = CaseTester.convert_signal_value(msg[1].strip())
+                            if signal_value is None:
+                                logger.error(f'{signal.name}={signal_value} value convert error')
+                                raise Exception(f'{signal.name}={signal_value} value convert error')
+                            signal.Value = signal_value
+                            self.send_single_msg(signal)
+                        except Exception as e:
+                            if str(e) not in step_evaluation:  # 防止原因重复
+                                step_evaluation.append(str(e))
+                            logger.error("Actions error: " + str(e))
                             action_pass = False
                             break
-                        else:
-                            try:
-                                signal = Variable(sigal_name_str)
-                                signal_value = CaseTester.convert_to_float(msg[1])
-                                if signal_value is None:
-                                    logger.error(f'{signal.name}={signal_value} value convert error')
-                                    raise Exception(f'{signal.name}={signal_value} value convert error')
-                                signal.Value = signal_value
-                                self.send_single_msg(signal)
-                            except Exception as e:
-                                if str(e) not in step_evaluation:  # 防止原因重复
-                                    step_evaluation.append(str(e))
-                                logger.error("Actions error: " + str(e))
-                                action_pass = False
-                                break
 
             if not action_pass:
                 tc_ret = False
@@ -616,18 +630,17 @@ class CaseTester:
             for pass_con in step.pass_condition:
                 if pass_con is not None and pass_con != '' and pass_con != 'None':
                     pass_con = str(pass_con).replace(' ', '').replace('&&', '')
-                    # con = str(pass_con).strip().split('==')
                     try:
                         # 匹配信号是数组类型的情况
                         array_index = None
-                        pattern = r'(\w+)\s*\[(\d+)\]\s*(==|!=|>=|<=|>|<)\s*(.*?)$'
+                        pattern = r'([\w:.]+)\s*\[(\d+)\]\s*(==|!=|>=|<=|>|<)\s*(.*?)$'
                         match = re.match(pattern, pass_con)
                         if match:
                             variable_name = match.group(1)  # 获取数组名称
                             array_index = int(match.group(2))  # 获取数组索引
                             pass_value = match.group(4)
                         else:
-                            pattern = r"(\w+)\s*(==|!=|>=|<=|>|<)\s*(.*?)$"
+                            pattern = r"([\w:.]+)\s*(==|!=|>=|<=|>|<)\s*(.*?)$"
                             match = re.match(pattern, pass_con)
                             if match is None:
                                 raise Exception(f'PassConditionFormatError ')
@@ -638,12 +651,14 @@ class CaseTester:
                             raise Exception(f'SignalNotFound: {variable_name} ')
                         real_value = Variable(variable_name).Value
                         step_evaluation.append(f'{variable_name}=={real_value}')
+
                         # "MSG_BatACChrgEngy==nan" 这种eval会报错
                         # 这里强调一下 任何值与 NaN相比都会返回False，包括 NaN == NaN
                         # 判断类型是否为 nan，用 math.isnan()
                         if 'nan' in pass_con:
                             pass_con = pass_con.replace('nan', '"nan"')
-                            if not isinstance(real_value, str) and math.isnan(real_value):  # NaN == NaN返回False 这里都转换为字符进行比较
+                            # NaN == NaN返回False 这里都转换为字符进行比较
+                            if not isinstance(real_value, str) and math.isnan(real_value):
                                 real_value = str(real_value)
                         # EEA2.0 rti中接收的数值可能是字符串 需要转成float类型进行比较
                         if isinstance(real_value, str) and real_value != 'nan':
@@ -655,11 +670,22 @@ class CaseTester:
                                 except ValueError:
                                     pass
                             pass
-                        result = eval(pass_con, {variable_name: real_value})
+                        # 通过替换无效字符创建一个有效的Python变量名
+                        safe_variable_name = variable_name.replace('::', '__').replace('.', '_')
+                        namespace = {}
+                        # 为调整后的变量名赋予实际值
+                        if real_value == 'nan':
+                            exec(f'{safe_variable_name} = "nan"', {}, namespace)
+                        else:
+                            exec(f"{safe_variable_name} = {real_value}", {}, namespace)
+                        # 现在可以安全地评估表达式了
+                        result = eval(pass_con.replace(variable_name, safe_variable_name), {}, namespace)
+                        # result = eval(pass_con, {variable_name: real_value})
                         if array_index is None:
                             logger.info(f'>>> {variable_name}: 实际值：{real_value}, 预期值：{pass_value}, 结果：{result}')
                         else:
-                            logger.info(f'>>> {variable_name}[{array_index}]: 实际值：{real_value[array_index]}, 预期值：{pass_value}, 结果：{result}')
+                            logger.info(
+                                f'>>> {variable_name}[{array_index}]: 实际值：{real_value[array_index]}, 预期值：{pass_value}, 结果：{result}')
                         if step_ret is None:
                             step_ret = result
                         else:
@@ -685,59 +711,3 @@ class CaseTester:
         test_info.tc_ret = tc_ret
         self.test_info[tc_name] = test_info
         return tc_ret
-
-
-if __name__ == '__main__':
-    pass
-
-    # from settings import *
-    # from connector.dds import DDSConnector
-    # from connector.sdc import SDCConnector
-    # from connector.ssh import SSHConnector
-    #
-    # ssh_connector = SSHConnector(hostname=env.ssh_hostname, username=env.ssh_username, password=env.ssh_password)
-    # sdc_connector = SDCConnector(dbo_filepath=env.dbo_filepath)
-    # dds_connector = DDSConnector(idl_filepath=env.idl_filepath)
-
-    # 这个是跑一个excel下的一个TC
-    # parser = CaseParser(
-        # tc_filepath=r"D:\likun3\Downloads\XBP_SIL_ThermalSystemDisplay.xlsm"
-        # tc_filepath=r"D:\likun3\Downloads\XBP_SIL_ACSetStatus_Debug.xlsm"
-    #     tc_filepath=r"D:\Project\soa-sil-xbp\runner\execute_case\2024-02-29-09-25-05\01_W01\XAP_SIL_Topic_TPMSInfo.xlsm")
-    #
-    # all_testcase = parser.get_all_testcase()
-    # tc1 = all_testcase.get('TC1')
-    # for test_step in tc1.get('test_steps'):
-    #     print(test_step.row_number, test_step.heading, test_step.actions, test_step.pass_condition)
-    #     print('>'*20)
-
-    # 这个是跑一个excel下的所有TC
-    # parser = CaseParser(
-    #     tc_filepath=r"D:\likun3\Downloads\XBP_SIL_ACSetStatus.xlsm"
-    # )
-    # tester = CaseTester(
-    #     sub_topics=['ACSetStatus'],
-    #     pub_topics=['ACSetStatus'],
-    #     sdc_connector=sdc_connector,
-    #     dds_connector=dds_connector,
-    #     ssh_connector=ssh_connector
-    # )
-    # TestPrecondition(tester)
-    # all_testcase = parser.get_all_testcase()
-    # for tc_sheet_name, tc_info in all_testcase.items():
-    #     tc_name = tc_info.get('case_name')
-    #     test_steps = tc_info.get('test_steps')
-    #     tester.run_test_case(tc_sheet_name, test_steps, tc_title=tc_name)
-    #     test_info = tester.test_info.get(tc_sheet_name)
-    #     time.sleep(2)
-    #     for tc_step in test_info.tc_steps:
-    #         print(
-    #             tc_step.row_number,
-    #             tc_step.heading,
-    #             tc_step.actions,
-    #             tc_step.pass_condition,
-    #             tc_step.evaluation_condition,
-    #             tc_step.step_ret
-    #         )
-    # TestPostCondition(tester)
-

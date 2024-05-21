@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun3@lixiang.com
 # @Time    : 2023/10/24 11:43
 # @File    : settings.py
 
@@ -30,6 +31,7 @@ class Settings:
         self.disable_sdc = True  # 启动时自动禁用sdc
         self.module_id_mapping = {}  # 远程执行变量
         self.case_mapping = {}  # 用例和模块的映射
+        self.sil_node_status = 0  # 0: 未部署  1: 已连接  2: 连接断开
         self.load(config_file)
 
     def __getattr__(self, item):

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun19941001@163.com
 # @Time    : 2023/10/19 17:30
 # @File    : dds.py
 
@@ -19,6 +20,7 @@ from protocol.lidds130.liddsxmlparser import Parser
 
 from protocol.rtidds import rticonnextdds_connector as rti
 from protocol.rtidds.rtiddssil import RtiDDSReader, RtiDDSWriter
+from protocol.rtidds.rtiddsxmlparser import ParseXML
 from connector import ConnectorPool
 
 
@@ -40,8 +42,8 @@ class DDSConnector:
         self.participant = self.dds_proxy.CreateDomainParticipantWithProfile_v2(self.idl_filepath, participant_name)
         logger.success(f'Create DPF {participant_name}')
         self.xml_parser = Parser(self.idl_filepath)
-        self.signal_map = {}  # {signal_name:topic_name}
-        self.signal2topic()
+        self.signal_map = self.xml_parser.signal_map  # {signal_name:topic_name}
+        self.signal2var()
         self.get_topic_names_from_xml()
 
     def __new__(cls, *args, **kwargs):
@@ -51,17 +53,9 @@ class DDSConnector:
                 cls._instance = super().__new__(cls)
             return cls._instance
 
-    def signal2topic(self):
-        data_types = self.xml_parser.types['dataTypes']
-        for key, val in data_types.items():
-            try:
-                topic_name = val['topic_name']
-                members = val['members']
-                for signal_name in members.keys():
-                    Variable(signal_name, 0)
-                    self.signal_map[signal_name] = topic_name
-            except Exception as e:
-                logger.error(f'signal2topic fail: {e}, topic_name: {topic_name}')
+    def signal2var(self):
+        for signal_name in self.signal_map.keys():
+            Variable(signal_name, 0)
 
     def get_topic_names_from_xml(self):
         self.reader_topic_names = sorted(list(self.xml_parser.profiles['data_readers'].keys()))
@@ -144,6 +138,8 @@ class DDSConnector:
                 ConnectorPool.dds_writer_pool[topic_name] = writer
 
     def publish(self, writer, signal_name, signal_value):
+        if '::' in signal_name:  # 处理topic不同但信号名相同的场景
+            signal_name = signal_name.split('::')[-1]
         logger.info(f'发送DDS消息：{writer.topic_name} | {signal_name} = {signal_value}')
         writer.set_value(signal_name, signal_value)
         writer.write()
@@ -160,6 +156,8 @@ class DDSConnector:
         dds_writer = ConnectorPool.dds_writer_pool[topic_name]
         for signal in signals:
             signal_name, signal_value = signal.name, signal.Value
+            if '::' in signal_name:  # 处理topic不同但信号名相同的场景
+                signal_name = signal_name.split('::')[-1]
             logger.info(f'发送DDS消息：{topic_name} | {signal_name} = {signal_value}')
             dds_writer.set_value(signal_name, signal_value)
         dds_writer.write()
@@ -193,35 +191,22 @@ class DDSConnectorRti(DDSConnector):
     # noinspection PyMissingConstructor
     def __init__(self, idl_filepath=''):
         self.idl_filepath = idl_filepath
+        self.dom_tree = parse(self.idl_filepath)
         self.reader_topic_names = []
         self.writer_topic_names = []
-        self.sub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaSubParticipant", url=idl_filepath)
-        self.pub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaPubParticipant", url=idl_filepath)
-        self.dom_tree = parse(self.idl_filepath)
-        self.signal_map = {}  # {signal_name:topic_name}
-        self.signal2topic()
+        self.dupl_signal_names = []
+        self.xml_parser = ParseXML(self.idl_filepath)
+        self.signal_map = self.xml_parser.signal_map  # {signal_name:topic_name}
+        self.dupl_signal_names = self.xml_parser.dupl_signal_names
+        self.signal2var()
         self.add_additional_signals()
         self.get_topic_names_from_xml()
+        self.sub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaSubParticipant", url=idl_filepath)
+        self.pub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaPubParticipant", url=idl_filepath)
 
-    def signal2topic(self):
-        root_node = self.dom_tree.documentElement
-        structs = root_node.getElementsByTagName('struct')
-        for topic_ in structs:
-            topic_name = topic_.getAttribute('name')
-            members = topic_.getElementsByTagName('member')
-            for member in members:
-                signal_name = member.getAttribute('name')
-                # 区分不同topic但是相同信号名的场景
-                if signal_name in env.signals_one2many:
-                    signal_name += f'{topic_name.lower()}_'
-                    Variable(signal_name, 0)
-                # elif signal_name in ['srv_res_chrg_end_times_', 'srv_res_chrg_star_times_']:
-                #     signal_name += f'{topic_name.lower()}_'
-                #     Variable(signal_name, '20230101000000')
-                else:
-                    Variable(signal_name, 0)
-                topic_name = topic_name.strip('_')
-                self.signal_map[signal_name] = topic_name
+    def signal2var(self):
+        for signal_name in self.signal_map.keys():
+            Variable(signal_name, 0)
 
     def get_topic_names_from_xml(self):
         data_readers = self.dom_tree.getElementsByTagName("data_reader")
@@ -246,7 +231,7 @@ class DDSConnectorRti(DDSConnector):
 
     def create_subscriber(self, topic_name):
         if not ConnectorPool.dds_reader_pool.get(topic_name):
-            dds_reader = RtiDDSReader(connector=self.sub_connector, topic_name=topic_name)
+            dds_reader = RtiDDSReader(connector=self.sub_connector, topic_name=topic_name, dupl_signal_names=self.dupl_signal_names)
             dds_reader.start()
             ConnectorPool.dds_reader_pool[topic_name] = dds_reader
 
@@ -255,14 +240,6 @@ class DDSConnectorRti(DDSConnector):
             dds_writer = RtiDDSWriter(connector=self.pub_connector, topic_name=topic_name)
             dds_writer.start()
             ConnectorPool.dds_writer_pool[topic_name] = dds_writer
-
-    def publish(self, writer, signal_name, signal_value):
-        # 处理topic不同但是信号名相同的场景
-        format_signals_match = '|'.join(env.signals_one2many)
-        if re.match("^({})".format(format_signals_match), signal_name):
-            signal_name = '_'.join(signal_name.split('_')[0:-2]) + '_'
-        logger.info(f'发送DDS消息：{writer.topic_name} | {signal_name} = {signal_value}')
-        writer.set_value(signal_name, signal_value)
 
     def release_connector(self):
         try:
@@ -273,6 +250,7 @@ class DDSConnectorRti(DDSConnector):
             logger.info('release rti dds_reader_pool ')
             for reader_thread in ConnectorPool.dds_reader_pool.values():
                 reader_thread.stop()
+            time.sleep(1)
             self.pub_connector.close()
             logger.info('release pub connector')
             self.sub_connector.close()
@@ -282,28 +260,32 @@ class DDSConnectorRti(DDSConnector):
 
 
 if __name__ == '__main__':
-    connector = DDSConnector(idl_filepath=r"D:\Project\soa-sil-xbp\data\matrix\XBP.xml")
-    
-    # logger.info('初始化 dds订阅器')
-    # sub_topic_names = ['EPSModeSts']
-    # for sub_tp_name in sub_topic_names:
-    #     connector.create_subscriber(sub_tp_name)
+    pass
+    # 测试 lidds
+    env.load(r"D:\Project\soa-sil-xbp\data\conf\settings_xbp.yaml")
+    dds_connector = DDSConnector(idl_filepath=r"D:\Project\soa-sil-xbp\data\matrix\vbs_XBP2.2.0.xml")
+    dds_connector.create_subscriber('BrakeSystemStatus')
+    dds_connector.create_subscriber('AdUploadCanFrequencyRequest')
+    signal = Variable('AdUploadCanFrequencyRequest::AdUploadCanFrequencyHeader.Timestamp')
+    signal.Value = 100
+    dds_connector.dds_send(signal)
+    signal = Variable('BrakeSystemStatus::MSG_ActuBrkPdlPrsdSts')
+    signal.Value = 100
+    dds_connector.dds_send(signal)
+    signal = Variable('m_Data')
+    signal.Value = [8] * 10
+    dds_connector.dds_send(signal)
+    time.sleep(1)
+    dds_connector.release_connector()
 
-    # 测试信号发送
-    # signal = Variable('MSG_CellMinVolt_32960')
-    # while True:
-    #     signal.Value = float('nan')
-    #     connector.dds_send(signal)
-    #     time.sleep(1)
-    #     signal.Value = float(1)
-    #     connector.dds_send(signal)
-    #     time.sleep(5)
-
-    signal3 = Variable('SRV_FrtACSwReq')
-    while True:
-        signal3.Value = 1
-        connector.dds_send(signal3)
-        time.sleep(1)
-        signal3.Value = 2
-        connector.dds_send(signal3)
-        time.sleep(1)
+    # 测试 rti
+    # env.load(r"D:\Project\soa-sil-xbp\data\conf\settings_xap.yaml")
+    # dds_connector = DDSConnectorRti(idl_filepath=r"D:\Project\soa-sil-xbp\data\matrix\rti_XAP241&XPP361.xml")
+    # dds_connector.create_subscriber('ToolBoxDsp')
+    #
+    # # 测试信号发送
+    # signal = Variable('ToolBoxDsp::msg_blwr_vol_fdbk_')
+    # signal.Value = 2
+    # time.sleep(1)
+    # dds_connector.dds_send(signal)
+    # dds_connector.release_connector()

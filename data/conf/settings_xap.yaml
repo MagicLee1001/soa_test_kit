@@ -1,0 +1,133 @@
+# window
+width: 900
+height: 600
+
+# cloud
+remote_server: https://test-manager.ontest.k8s.chj.cloud
+svn_username: xxx
+svn_password: xxx
+
+# feishu
+notice_chat_id: oc_85df55ac8d0737d59a7dfefcb5d7c38b
+notice_base_url: https://iot-openapi-dev.chehejia.com/vvrobot
+notice_path: /hook/messages
+notice_temp_id: ctp_AA8KJSxbvB8x
+
+# ssh
+ssh_hostname: 172.31.30.32
+ssh_username: root
+ssh_password: root
+local_net_segment: 172.31.30.166
+
+# sdc sil server
+sil_server_ip: 172.31.30.32
+sil_server_port: 60000
+
+# vcs
+vcs_db_path: /app_data/vcs/
+vcs_db_name: vcs_v1.db
+vcs_signal_table_name: config_store_int
+
+# local filepath
+result_dir: data\result
+ssh_key_filepath: data\key\xcu_rsa_ssh
+idl_filepath: data\matrix\idl.xml
+dbo_filepath: data\matrix\dbc_lin_dbis_matrix.dbo
+sil_local_filepath: data\key\sil
+sil_sdf_local_filepath: data\key\sil.sdf
+case_dir: data\case\debug
+
+# remote filepath
+sil_remote_filepath: /apps/x01/bin/sil
+sil_sdf_remote_filepath: /apps/x01/sdf/sil.sdf
+dbo_remote_filepath: /apps/x01/etc/sdc/dbc_lin_dbis_matrix.dbo
+
+# dds
+sub_topics:
+  - VehicleModeInfo
+  - DoorStatus
+  - WindowsStatus
+  - WiperWshrStatus
+  - LockStatus
+  - ExteriorLightInfo
+  - InternalLightStatus
+  - HornStatus
+  - TPMSInfo
+  - ChargingStatus
+  - EnergyManagementInfo
+  - FuelnjcStatus
+  - RrvwMirrorStatus
+  - SSStatus
+  - ACStatus
+  - DriverSeatStatus
+  - PassengerSeatStatus
+  - SecLSeatStatus
+  - SecMSeatStatus
+  - SecRSeatStatus
+  - ThirdLSeatStatus
+  - ThirdRSeatStatus
+  - ThirdSeatStatus
+  - FsdWarningInfo
+  - StrgWhlStatus
+  - BuckleSts
+  - XCUECUOnLineStatus
+  - PedalStatus
+  - VehicleStatus
+  - FridgeStatus
+  - AirSusStatus
+  - ToolBoxDsp
+  - WarningInfo
+  - PSDStatus
+  - XCUWorkModeControl
+  - RepairStatus
+  - RoadmodleRec
+  - ToolBoxMileageDsp
+  - VehicleInfo32960
+  - MotorData32960
+  - EngineData32960
+  - ExtremumData32960
+  - WarningData32960
+  - RESSVoltageData32960
+  - RESSTempData32960
+#  - XCUDDSStatus
+
+pub_topics:
+  - BuckleAdjust
+  - ChargingControl
+  - VehicleControl
+  - AirSusAdjust
+  - LockControl
+  - DoorControl
+  - DriverSeatControl
+  - PassengerSeatControl
+  - SecLSeatControl
+  - SecRSeatControl
+  - ThirdLSeatControl
+  - ThirdRSeatControl
+  - ExteriorLightControl
+  - InternalLightControl
+  - WindowsControl
+  - ACControl
+  - HornControl
+  - HUWorkModeControl
+  - SkylightControl
+  - StrgWhlControl
+  - MirrorControl
+  - WiperWshrControl
+  - ThirdSeatControl
+  - PedalControl
+  - ConfigControl
+  - HUWorkModeInfo
+  - HuOmsInfo
+  - SecMSeatControl
+  - RmtDiagInfo
+  - ADASInfo
+#  - HUDDSStatus
+
+signals_one2many:
+  - srv_control_source_
+  - srv_request_id_
+  - srv_time_
+  - msg_rr_acblow_vol_fdbk_
+  - msg_blwr_vol_fdbk_
+  - msg_en_clnt_temp_

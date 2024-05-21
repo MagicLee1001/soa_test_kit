@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun19941001@163.com
 # @Time    : 2024/2/6 15:09
 # @File    : rtiddssil.py
 
 import json
 import time
 import math
-import ctypes
-import inspect
+import random
 import threading
 import traceback
-from xml.dom.minidom import parse
 from protocol.rtidds import rticonnextdds_connector as rti
 from runner.log import logger
 from runner.variable import Variable
@@ -23,10 +22,11 @@ _output_lock = threading.Lock()
 
 
 class RtiDDSReader(threading.Thread):
-    def __init__(self, connector, topic_name):
+    def __init__(self, connector, topic_name, dupl_signal_names=None):
         super().__init__()
         self.connector = connector
         self.topic_name = topic_name
+        self.duplicate_signal_names = dupl_signal_names if dupl_signal_names else []
         self.datareader = self.create_datareader()
         self._is_running = threading.Event()
 
@@ -42,7 +42,7 @@ class RtiDDSReader(threading.Thread):
             return isinstance(f, float) and math.isnan(f)
 
         # 规则 1: key里有'xcu_system_time_'就不打印
-        if key in ['xcu_system_time_']:
+        if 'xcu_system_time_' in key:
             return False
 
         # 规则 2: 两个值全为nan的时候不打印
@@ -89,13 +89,14 @@ class RtiDDSReader(threading.Thread):
                                     value = json.loads(value)  # [0, 0, 255, ...., 255]
 
                                 # 不同topic同一信号名时进行处理
-                                if key in env.signals_one2many:
-                                    new_key = f'{key}{self.topic_name.lower()}_'
+                                if key in self.duplicate_signal_names:
+                                    new_key = f'{self.topic_name}::{key}'
                                 else:
                                     new_key = key
+
                                 # 只打印变化的信号值
                                 last_value = Variable(new_key).Value
-                                if self.is_log_message(key, last_value, value):
+                                if self.is_log_message(new_key, last_value, value):
                                     logger.info(f'接收DDS消息：{self.topic_name} | {key} = {value}')
                                 Variable(new_key).Value = value
                             except:
@@ -111,6 +112,7 @@ class RtiDDSReader(threading.Thread):
 class RtiDDSWriter(threading.Thread):
     def __init__(self, connector, topic_name):
         super().__init__()
+        # 最好每一个线程一个独立的connector dos测试发现所有线程共用connector会有资源抢占导致崩溃的问题
         self.connector = connector
         self.topic_name = topic_name
         self.datawriter = self.create_datawriter()
@@ -132,13 +134,17 @@ class RtiDDSWriter(threading.Thread):
             try:
                 if isinstance(signal_value, str):
                     self.datawriter.instance.set_string(signal_name, signal_value)
+                elif isinstance(signal_value, dict):
+                    self.datawriter.instance.set_dictionary(signal_value)
                 else:
                     self.datawriter.instance.set_number(signal_name, signal_value)
-                self.datawriter.write()
                 # wait是保证有接收端接收再往下走,不wait就直接发出去就不管了
                 # self.datawriter.wait()
             except Exception as e:
                 logger.error(e)
+
+    def write(self):
+        self.datawriter.write()
 
     def stop(self):
         self._is_running.set()
@@ -148,9 +154,61 @@ class RtiDDSWriter(threading.Thread):
         logger.info(f'writer exit: {self.topic_name}')
 
 
+class RtiDDSWriterDoS(RtiDDSWriter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args)
+        self.stop_event = threading.Event()
+        self.dds_xml_obj = kwargs.get('dds_xml_obj')
+        self.interval = kwargs.get('interval', 1)
+
+    def run(self):
+        signal_names = [i.split(':')[-1] for i in self.dds_xml_obj.topic2signal[self.topic_name]]
+        while not self.stop_event.is_set():
+            for signal_name in signal_names:
+                signal_value = float(random.randint(0, 2**8-1))
+                try:
+                    self.set_value(signal_name, signal_value)
+                    self.write()
+                except Exception as e:
+                    print(e, f'{self.topic_name} | {signal_name} = {signal_value}')
+                else:
+                    print(f'pub msg: {self.topic_name} | {signal_name} = {signal_value}')
+            time.sleep(self.interval)
+
+    def stop(self):
+        self.stop_event.set()
+
+
 if __name__ == '__main__':
     pass
-    filepath = r"D:\Project\soa-sil-xbp\data\matrix\rti_XAP.xml"
+    filepath = r"D:\likun3\Downloads\simulator_configs_new(1).xml"
     sub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaSubParticipant", url=filepath)
-    dr = RtiDDSReader(sub_connector, topic_name='ACControl')
+    dr = RtiDDSReader(sub_connector, topic_name='DDSMapEvent')
     dr.start()
+    dr = RtiDDSReader(sub_connector, topic_name='RESSTempData32960')
+    dr.start()
+    dr = RtiDDSReader(sub_connector, topic_name='DDSRouteLinkInfo')
+    dr.start()
+
+    pub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaPubParticipant", url=filepath)
+    dw = RtiDDSWriter(pub_connector, topic_name='DDSMapEvent')
+    dw.set_value('type', 1)
+    dw.write()
+    pub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaPubParticipant", url=filepath)
+    dw = RtiDDSWriter(pub_connector, topic_name='RESSTempData32960')
+    dw.set_value('msg_resssys_temp_', {'msg_resssys_temp_': [1]*100})
+    dw.write()
+    pub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaPubParticipant", url=filepath)
+    dw = RtiDDSWriter(pub_connector, topic_name='DDSRouteLinkInfo')
+    dyna_value = {
+        "timestamp": 1641838209182,
+        "pathId": 100,
+        "linkInfos": [
+            {"id": 1, "length": 500, "travelTime": 300, "staticTravelTime": 290},
+            {"id": 2, "length": 1000, "travelTime": 900, "staticTravelTime": 850},
+            # ... 更多 LinkInfo
+        ]
+    }
+    dw.set_value('linkInfos', dyna_value)
+    dw.write()
+

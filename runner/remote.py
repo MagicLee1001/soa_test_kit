@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun19941001@163.com
 # @Time    : 2023/11/21 14:37
 # @File    : remote.py
 
@@ -311,3 +312,18 @@ class CallBack:
             logger.error('更新日志失败' + str(e))
             requests.get(env.remote_server + '/caseRun/caseLogResult',
                          params={'taskId': self.task_id, 'caseId': case_id, 'logPath': log_path})
+
+
+if __name__ == '__main__':
+    # resp = requests.get('https://test-manager.ontest.k8s.chj.cloud/caseRun/systemVersion',
+    #              json={'taskId': 'a', 'distributeId': '1', 'xcu_info': {"a": 1}})
+    # resp = requests.get('https://test-manager.ontest.k8s.chj.cloud/caseRun/task',
+    #              params={'taskId': '44b2be6e82d211eeb33d96a234d0dd88 ', 'distributeId': '2091'})
+    # print(resp.json())
+    start_time = time.time()
+    run = Run(server='test-manager.ontest.k8s.chj.cloud',
+              task_id='48205f56d44f11eeac573204857f6094',
+              distribute_id='7740')
+    cases, result_case_path = run.parse_case()
+    print(cases)
+    print(time.time()-start_time)

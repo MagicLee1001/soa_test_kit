@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun19941001.com
 # @Time    : 2023/10/25 15:05
 # @File    : ssh.py
 
@@ -252,20 +253,23 @@ class SSHClient:
             return True
 
     @check_connections
-    def execute_cmd(self, cmd, env=None):
+    def execute_cmd(self, cmd, read_buffer=4096, env=None, console=False):
         stdin, stdout, stderr = self._client.exec_command(cmd, environment=env)
-        stdout = stdout.read().decode("utf-8")
+        stdout = stdout.read(read_buffer).decode("utf-8")
         if len(stdout) > 0:
+            if console:
+                logger.info(stdout)
             return stdout
-        stderr = stderr.read().decode("utf-8")
+        stderr = stderr.read(read_buffer).decode("utf-8")
         if len(stderr) > 0:
+            if console:
+                logger.info(stdout)
             return stderr
 
     @check_connections
-    def execute_interact_cmd(self, cmd, timeout=10, tail='# ', buffer_size=1024, console=True):
+    def execute_interact_cmd(self, cmd, timeout=10, tail='# ', exit_condition=None, buffer_size=1024, console=False):
         """这个方法每次使用都是一个独立的channel，不适合连续作业"""
-        buffer = ''
-        b_recv = ''
+        output_buffer = ''
         pwd_info = 'password: '
         ask = '(yes/no)? '
         num_tail_cursor = 0
@@ -274,41 +278,42 @@ class SSHClient:
         while True:
             try:
                 # 这个地方，如果一直接收不到的话，会形成阻塞，只会走timeout条件
-                b_recv = self._channel.recv(buffer_size)
-                recv = b_recv.decode('utf-8')
-                recv = self._ansi_escape.sub('', recv)
-                time.sleep(0.1)
+                output = self._ansi_escape.sub('', self._channel.recv(buffer_size).decode('utf-8'))
             except OSError as e:
                 logger.error(f'Connection OS Error info: {e} ')
                 self._channel.close()
-                return buffer
+                return output_buffer
             except UnicodeDecodeError as e:
-                logger.info(f'Recv bytes: {b_recv}')
                 logger.error(f'UnicodeDecode Error info : {e} ')
             else:
-                if console and recv:
-                    print(recv)
-                buffer += recv
+                if console and output:
+                    logger.info(output)
+                output_buffer += output
                 # ssh命令要输入密码确认
-                if buffer.endswith(pwd_info):
+                if output_buffer.endswith(pwd_info):
                     self._channel.send(self.password + '\n')
-                elif buffer.endswith(tail) and num_tail_cursor == 0:
+                elif output_buffer.endswith(tail) and num_tail_cursor == 0:
                     self._channel.send(cmd + '\n')
                     num_tail_cursor += 1
                 # 在当前所在会话框
-                elif buffer.endswith(tail) and num_tail_cursor != 0:
+                elif output_buffer.endswith(tail) and num_tail_cursor != 0:
                     self._channel.close()
-                    return buffer
+                    return output_buffer
                 # 有询问密钥认证之类的对话框
-                elif buffer.endswith(ask):
+                elif output_buffer.endswith(ask):
                     self._channel.send('yes' + '\n')
                 # timeout阻塞时，这个条件走不到
                 elif self.invoke_exit:
                     logger.info('Receive invoke exit flag and close channel')
                     self._channel.close()
-                    return buffer
+                    return output_buffer
+                elif exit_condition and exit_condition in output:
+                    self._channel.send('\x03')  # 发送 Ctrl-C
+                    self._channel.close()
+                    return output_buffer
                 else:
                     pass
+            time.sleep(0.1)
 
 
 class SSHConnector(SSHClient):
@@ -320,38 +325,55 @@ class SSHConnector(SSHClient):
         self.vcs_ip_config_filepath = '/apps/x01/etc/vcs/ip_config.json'
         self.update_dbo_file()
         self.get_xcu_info()
+        self.add_channel_cmd_signals()
         # self.put_sil_server()  # 放到PreCondition运行
+
+    def add_channel_cmd_signals(self):
+        """
+        将终端命令行操作设置成信号
+        Returns:
+        """
+        Variable('ssh_exec_cmd').Value = ''
+        Variable('ssh_interactive_cmd').Value = ''
+        Variable('ssh_exec_output').Value = ''
 
     def open_permission(self):
         self.execute_cmd('mount -o remount rw /')
         self.execute_cmd('mount -o remount rw /apps')
 
-    def recover_sil_environment(self):
+    def check_process(self, proc_name, timeout=30):
+        ct = time.time()
+        ret = 0
+        while time.time() - ct <= timeout:
+            ret = self.execute_cmd(f'pidof {proc_name}')
+            if ret:
+                logger.success(f'{proc_name}进程已启动 进程号: {ret}')
+                break
+            time.sleep(2)
+        if not ret:
+            logger.error(f'>>> {proc_name}进程未启动')
+        return ret
+
+    def recover_sil_environment(self, recover_vcs=True, recover_sdc=True):
         """
         还原测试环境, 恢复到测试之前
         """
         self.open_permission()
-        # 还原vcs配置
-        self.setup_vcs_ip_config(0)
+        if recover_vcs:
+            # 还原vcs配置
+            self.setup_vcs_ip_config(0)
         # 移除sil仿真相关程序与配置
         self.execute_cmd(f'rm {env.sil_remote_filepath}')
         self.execute_cmd(f'rm {env.sil_sdf_remote_filepath}')
-        self.execute_cmd('mv /apps/x01/bin/sdc1 /apps/x01/bin/sdc')
+        if recover_sdc:
+            self.execute_cmd('mv /apps/x01/bin/sdc1 /apps/x01/bin/sdc')
         self.execute_cmd('sync')
         time.sleep(1)
         self.execute_cmd('reboot')
         logger.info('>>> 重启被测设备以恢复原有服务 等待20秒')
         time.sleep(20)
-        ct = time.time()
-        ret = 0
-        while time.time() - ct <= 30:
-            ret = self.execute_cmd('pidof sdc')
-            if ret:
-                logger.success(f'sdc服务已启动 进程号: {ret}')
-                break
-            time.sleep(2)
-        if not ret:
-            logger.error('>>> 测试环境恢复异常 sdc服务未启动, 请检查')
+        if recover_sdc:
+            self.check_process('sdc', timeout=30)
 
     def get_xcu_info(self):
         env.xcu_info = {'vin': self.get_vin(), 'config_word': self.get_cfg_wd(), 'baseline_version': '',
@@ -381,6 +403,7 @@ class SSHConnector(SSHClient):
                     env.xcu_info['apps_version'] = res_list[i + 1]
                 else:
                     pass
+        logger.info(f'获取XCU版本信息: {env.xcu_info}')
         return env.xcu_info
 
     def get_vin(self):
@@ -444,56 +467,81 @@ class SSHConnector(SSHClient):
                 local_file=env.dbo_filepath
             )
 
+    def disable_sdc_service(self):
+        self.open_permission()
+        output = self.execute_cmd(f'pidof sdc')
+        if output:
+            logger.info(f'>>> 当前sdc服务已启动 进程id: {output}, 开始禁用sdc服务')
+            self.execute_cmd('mv /apps/x01/bin/sdc /apps/x01/bin/sdc1')
+            self.execute_cmd('sync')
+            self.execute_cmd('killall -9 sdc')
+        else:
+            logger.info('>>> 当前sdc服务未启动 无需禁用')
+
+    def enable_sdc_service(self):
+        self.open_permission()
+        output = self.execute_cmd(f'pidof sdc')
+        if not output:
+            logger.info('>>> 当前sdc服务未启动 开始启动')
+            self.execute_cmd('mv /apps/x01/bin/sdc1 /apps/x01/bin/sdc')
+            self.execute_cmd('sync')
+            time.sleep(1)
+            self.execute_cmd('reboot')
+            logger.info('>>> 重启被测设备以自动激活soa服务 等待20秒')
+            time.sleep(20)
+            self.check_process('sdc', timeout=20)
+
     def put_sil_server(self):
         self.open_permission()
         need_reboot = False
+        pid = self.execute_cmd(f'pidof sil')
         output = self.execute_cmd(f'ls {env.sil_remote_filepath}')
-        if 'No such file' in output:
+        if 'No such file' in output or not pid:
             need_reboot = True
-            logger.info('>>> 开始部署sil server程序到远端被测设备')
+            logger.info('>>> 当前目标无sil服务, 开始部署sil仿真程序到被测设备')
+            logger.info(f'本地: {env.sil_local_filepath} --> 远端: {env.sil_remote_filepath}')
             self.sftp_put(
                 local_file=env.sil_local_filepath,
                 remote_file=env.sil_remote_filepath
             )
             self.execute_cmd(f'chmod 777 {env.sil_remote_filepath}')
+        else:
+            logger.info(f'>>> sil服务已启动 {pid}')
 
         output = self.execute_cmd(f'ls {env.sil_sdf_remote_filepath}')
         if 'No such file' in output:
             need_reboot = True
-            logger.info('>>> 开始配置sil sdf文件到远端被测设备')
+            logger.info('>>> 当前目标无sil sdf文件, 开始上传文件到被测设备')
+            logger.info(f'本地: {env.sil_sdf_local_filepath} --> 远端: {env.sil_sdf_remote_filepath}')
             self.sftp_put(
                 local_file=env.sil_sdf_local_filepath,
                 remote_file=env.sil_sdf_remote_filepath
             )
             self.execute_cmd(f'chmod 777 {env.sil_sdf_remote_filepath}')
-        time.sleep(1)
+        else:
+            logger.info('>>> 当前目标存在sil sdf文件')
 
         if env.disable_sdc:
-            output = self.execute_cmd(f'pidof sdc')
-            if output:
-                need_reboot = True
-                logger.info('>>> 开始禁用sdc服务')
-                self.execute_cmd('mv /apps/x01/bin/sdc /apps/x01/bin/sdc1')
-            time.sleep(1)
+            self.disable_sdc_service()
 
         if need_reboot:
+            self.execute_cmd('sync')
+            time.sleep(1)
             self.execute_cmd('reboot')
             logger.info('>>> 重启被测设备以自动激活sil服务 等待20秒')
             time.sleep(20)
-            ct = time.time()
-            ret = 0
-            while time.time() - ct <= 30:
-                ret = self.execute_cmd('pidof sil')
-                if ret:
-                    logger.success(f'sil服务已启动 进程号: {ret}')
-                    break
-                time.sleep(2)
+            ret = self.check_process('sil', timeout=30)
             if not ret:
                 logger.error('>>> 执行环境异常 sil服务未启动 开始回滚')
                 self.recover_sil_environment()
                 raise Exception('sil simulator process not exist')
+        else:
+            logger.info(f'>>> 目标环境ready 无需重启')
 
     def get_vsc_db_signals(self):
+        """
+        测试前需要运行
+        """
         signals = {}
         cmd = f'sqlite3 -csv {env.vcs_db_path}{env.vcs_db_name} "select * from {env.vcs_signal_table_name}"'
         res = self.execute_cmd(cmd)
@@ -547,7 +595,12 @@ class SSHConnector(SSHClient):
 
 if __name__ == '__main__':
     ssh_connector = SSHConnector(hostname='172.31.30.32', username='root', password='')
-    print(ssh_connector.get_vin())
+
+    # ssh_connector.put_sil_server()
+    # print(ssh_connector.get_vin())
+
+    # signals = ssh_connector.get_vsc_db_signals()
+    # print(signals)
 
     # ssh_connector.set_vsc_db_signal(signal_name='ActuEgyMd_out_Inner', signal_value=2)
     # signals = ssh_connector.get_vsc_db_signals()

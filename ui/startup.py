@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun19941001@163.com
 # @Time    : 2024/3/29 15:37
 # @File    : start_up.py
 
@@ -12,7 +13,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QPushButton, QSpacerItem, QHBoxLayout, QLabel, QTextEdit, QFormLayout, QFrame, QFileDialog, QDialog,
     QSizePolicy, QRadioButton, QButtonGroup
 )
-from settings import env
+from settings import env, work_dir
 from connector.dds import DDSConnector, DDSConnectorRti
 
 
@@ -26,7 +27,8 @@ class PlatformConfigurationDialog(QDialog):
     def select_setting(self):
         # PyQt5中使用QFileDialog.getOpenFileName()方法选择一个文件
         # 参数依次是 窗口名字，起始路径，文件格式过滤器
-        filepath, _ = QFileDialog.getOpenFileName(self, "选择配置文件", "", "Setting File (*.yaml);;All Files (*)")
+        find_dir = os.path.normpath(os.path.join(work_dir, 'data', 'conf'))
+        filepath, _ = QFileDialog.getOpenFileName(self, "选择配置文件", find_dir, "Setting File (*.yaml);;All Files (*)")
         if filepath:
             env.load(filepath)
             self.refresh_ui()

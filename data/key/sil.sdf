@@ -1,0 +1,10 @@
+Mode=normal factory logistic exhibition ota1 ota2 repair
+Restart=1
+Exec=sil
+Environment=LD_LIBRARY_PATH=:/apps/x01/lib/:/framework/lib/:/usr/lib:/lib/:/lib:/apps/x01/mesh/iot/lib:/apps/x01/res/lua_lib/:/apps/x01/mesh_services/iot/lib/:/apps/ota/lib/
+Environment=PATH=/apps/x01/bin:/usr/bin:/bin
+Environment=LUA_CPATH=/apps/x01/res/lua_lib/?.so
+Environment=LUA_PATH=/apps/x01/res/lua/?.lua
+CpuLimit=40
+MemLimit=800M
+StartDelay=4000

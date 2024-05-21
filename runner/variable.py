@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun19941001@163.com
 # @Time    : 2023/10/19 18:13
 # @File    : variable.py
+
 
 import threading
 from collections import deque
@@ -37,6 +39,12 @@ class Variable:
         with cls._lock:
             return cls._vars_mapping.keys()
 
+    @classmethod
+    def get_all_signals(cls):
+        with cls._lock:
+            # 注意使用时最好用snapshot防止多线程在字典迭代过程中对字典修改 list(dict.values())
+            return list(cls._vars_mapping.values())
+
     @property
     def Value(self):
         with self._lock_variable:
@@ -50,7 +58,7 @@ class Variable:
 
 if __name__ == '__main__':
     pass
-    Variable('SOA', 0)
+    Variable('SOA')
     print(Variable('SOA').Value)
     Variable('SOA').Value = 1
     print(Variable('SOA').Value)

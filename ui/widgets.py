@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun19941001@163.com
 # @Time    : 2024/3/29 14:15
 # @File    : widgets.py
 
@@ -10,7 +11,7 @@ import traceback
 import subprocess
 from runner.log import logger
 from PyQt5 import QtWidgets, QtGui, QtCore, sip
-from PyQt5.QtCore import Qt, QPoint, QRect, QSize, QModelIndex, pyqtSignal, QCoreApplication
+from PyQt5.QtCore import Qt, QPoint, QRect, QSize, QModelIndex, pyqtSignal, QCoreApplication, QDateTime
 from PyQt5.QtGui import QStandardItemModel, QTextCursor, QFont, QIcon, QBrush, QPixmap, QColor, QTextOption
 from PyQt5.Qt import QStringListModel, QCompleter, QLineEdit, QListView, QMutex, QThread, QObject, QTimer
 from PyQt5.QtWidgets import (
@@ -18,9 +19,37 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QHeaderView, QTableWidgetItem, QLabel, QCheckBox, QScrollArea, QTextEdit, QMessageBox, QFormLayout,
     QFrame, QAction, QFileDialog, QStyle, QStyleOptionViewItem, QStyleOptionButton, QInputDialog, QTabBar, QDialog,
     QComboBox, QListWidget, QListWidgetItem, QProgressBar, QMenu, QPlainTextEdit, QSplitter, QSizePolicy, QActionGroup,
-    QRadioButton, QButtonGroup
+    QRadioButton, QButtonGroup, QDateTimeEdit, QDialogButtonBox
 )
 from runner.simulator import VehicleModeDiagnostic
+
+
+class DDSFuzzDatePickerDialog(QDialog):
+    datetime_selected = pyqtSignal(QDateTime)
+
+    def __init__(self, app, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.app = app
+        self.init_ui()
+
+    def init_ui(self):
+        self.resize(200, 200)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)  # 取消帮助
+        self.setWindowIcon(QIcon('ui/icons/icon.ico'))
+        self.setWindowTitle("选择日期和时间")
+        layout = QVBoxLayout(self)
+        self.datetime_edit = QDateTimeEdit(QDateTime.currentDateTime(), self)
+        self.datetime_edit.setCalendarPopup(True)
+        layout.addWidget(self.datetime_edit)
+        buttonBox = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        layout.addWidget(buttonBox)
+        buttonBox.accepted.connect(self.accept_selection)
+        buttonBox.rejected.connect(self.reject)
+
+    def accept_selection(self):
+        selected_datetime = self.datetime_edit.dateTime()
+        self.datetime_selected.emit(selected_datetime)
+        self.accept()
 
 
 class CustomListWidget(QListWidget):
@@ -323,3 +352,29 @@ class ErrorDialog(QDialog):
         # Make dialog resizable and maximizable
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowSystemMenuHint)
         return super().exec_()
+
+
+class SilConnectionLabel(QLabel):
+    def __init__(self, app, *args, **kwargs):
+        super(SilConnectionLabel, self).__init__(*args, **kwargs)
+        self.app = app
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.RightButton:
+            self.show_context_menu(event.pos())
+        else:
+            # 调用基类实现以处理其他类型的点击，例如左键点击
+            super().mousePressEvent(event)
+
+    def show_context_menu(self, position):
+        try:
+            context_menu = QMenu(self)
+            deploy = context_menu.addAction('部署sil仿真程序并建立连接')
+            undeploy = context_menu.addAction('移除sil仿真程序')
+            action = context_menu.exec_(self.mapToGlobal(position))
+            if action == deploy:
+                self.app.deploy_sil_node_task.start()
+            elif action == undeploy:
+                self.app.undeploy_sil_node_task.start()
+        except:
+            logger.error(traceback.format_exc())

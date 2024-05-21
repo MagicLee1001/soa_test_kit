@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
+# @Email   : likun19941001@163.com
 # @Time    : 2023/10/19 17:30
 # @File    : sdc.py
 
@@ -13,7 +14,7 @@ from runner.log import logger
 from ctypes import Structure, c_char, c_float, sizeof, memmove, addressof
 from select import select
 from runner.variable import Variable
-
+from settings import env
 
 M2A_NAME_TYPE = {}
 
@@ -66,7 +67,8 @@ class StructM2A:
 
 class SDCConnector(threading.Thread):
     """
-    因为sdc sil-server只允许一个客户端连接 这里将类重写成单例线程
+    因为 sdc sil-server只允许一个客户端连接 这里将类重写成单例线程
+    注意: 该实例线程整个生命周期只能启动一次 (多线程的特性)
     """
     recv_buffer = bytes()
     a2m_size = sizeof(StructA2M())
@@ -81,13 +83,14 @@ class SDCConnector(threading.Thread):
         with self._instance_lock:
             if not self.__first_init:
                 super().__init__()
+                self.started = False
                 self._is_keep_recv = threading.Event()
                 self._is_reconnecting.clear()
                 self.dbo_filepath = dbo_filepath
                 self.pre_init()
                 self.server_ip = server_ip
                 self.server_port = server_port
-                self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.client_socket = None
                 SDCConnector.__first_init = True
 
     def __new__(cls, *args, **kwargs):
@@ -98,9 +101,18 @@ class SDCConnector(threading.Thread):
             return cls._instance
 
     def connect_server(self):
+        """
+        实例化后必须要放在主线程先调用，否则子线程抛出异常无法阻止主线程的运行
+        导致GUI操作收发接口会卡死
+        Returns:
+
+        """
         with self.conn_lock:  # 加锁防止同一时间重复连接出问题
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.client_socket.connect((self.server_ip, self.server_port))
             self.client_socket.setblocking(False)
+            logger.info(f'连接sil成功 ip: {self.server_ip}, port: {self.server_port}')
+            env.sil_node_status = 1
 
     def reconnect_server(self):
         """
@@ -113,7 +125,6 @@ class SDCConnector(threading.Thread):
         self.close()
         while not self._is_keep_recv.is_set():
             try:
-                self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.connect_server()
             except socket.error:
                 self.close()
@@ -135,6 +146,7 @@ class SDCConnector(threading.Thread):
         try:
             self.client_socket.sendall(data)
         except socket.error:
+            env.sil_node_status = 2
             if not self._is_reconnecting.is_set():
                 logger.warning('TCP连接断开, 正在尝试重连并重新发送消息')
                 self.reconnect_server()
@@ -189,9 +201,9 @@ class SDCConnector(threading.Thread):
                         logger.info(f'接收TCP消息：{signal_name_str} = {signal_value}')
 
     def add_additional_signals(self):
-        Variable('SIL_Client_CnnctSt', 1)
-        Variable('SIL_Client_Cnnct', 1)
-        Variable('Sw_HandWakeup', 1)
+        Variable('SIL_Client_CnnctSt').Value = 1
+        Variable('SIL_Client_Cnnct').Value = 1
+        Variable('Sw_HandWakeup').Value = 1
 
     def parse_dbo_a2m(self):
         if os.path.exists(self.dbo_filepath):
@@ -222,11 +234,12 @@ class SDCConnector(threading.Thread):
         self._is_keep_recv.set()
 
     def run(self) -> None:
-        self.connect_server()
+        self.started = True
         while not self._is_keep_recv.is_set():
             try:
                 self.tcp_recv()  # select设置了超时时间 超过时间就会继续循环
             except socket.error:
+                env.sil_node_status = 2
                 if not self._is_reconnecting.is_set():
                     logger.warning('TCP连接断开, TCP消息接收线程触发重连 ...')
                     self.reconnect_server()
@@ -235,15 +248,16 @@ class SDCConnector(threading.Thread):
 
 
 if __name__ == '__main__':
-    from settings import env
-    sdc_client = SDCConnector(env.dbo_filepath, server_ip=env.sil_server_ip, server_port=env.sil_server_port)
+    sdc_client = SDCConnector(env.dbo_filepath, server_ip=env.sil_server_ip, server_port=1111)
+    sdc_client.connect_server()  # 必须要先调用
     sdc_client.start()  # I/O多路复用 持续接收
-    time.sleep(2)
-    sdc_client.reconnect_server()
-    # 接收同时测试发送
-    # 这一步全局Variable已经初始化完成了，只需要改变信号值就行
-    signal = Variable('M2A_FrtACSwSts_Inner')
-    signal.Value = 1
-    while True:
-        sdc_client.tcp_send(signal)
-        time.sleep(2)
+    # time.sleep(2)
+    # sdc_client.reconnect_server()
+    #
+    # # 接收同时测试发送
+    # # 这一步全局Variable已经初始化完成了，只需要改变信号值就行
+    # signal = Variable('M2A_FrtACSwSts_Inner')
+    # signal.Value = 1
+    # while True:
+    #     sdc_client.tcp_send(signal)
+    #     time.sleep(2)

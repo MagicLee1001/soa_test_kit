@@ -3,7 +3,7 @@
 <author>李琨</author>
 
 ## 项目描述
-车云系统SOA-SiL测试框架,适配XCU-XBP平台
+SOA-SiL测试框架,适配车机系统域间通信DDS、TCP测试
 
 ## 环境依赖
 Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (AMD64)] on win32

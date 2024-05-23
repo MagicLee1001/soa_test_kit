@@ -1,4 +1,4 @@
-# SOA-SiL-XBP
+# SOA Test Kit
 
 <author>李琨</author>
 

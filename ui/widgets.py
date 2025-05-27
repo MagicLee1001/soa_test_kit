@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
-# @Email   : likun19941001@163.com
 # @Time    : 2024/3/29 14:15
 # @File    : widgets.py
 
 import os
 import time
 import json
+import queue
 import traceback
 import subprocess
 from runner.log import logger
@@ -22,6 +22,63 @@ from PyQt5.QtWidgets import (
     QRadioButton, QButtonGroup, QDateTimeEdit, QDialogButtonBox
 )
 from runner.simulator import VehicleModeDiagnostic
+
+
+class HTMLStatic:
+    table_style = """
+        <style>
+        body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .container {
+            padding: 15px;
+            box-sizing: border-box;
+            width: 100%;
+            height: 100%;                   
+        }
+        .title {
+            font-size: 16px;
+            font-weight: bold;
+            color: #444;
+            margin-bottom: 10px;
+        }
+        .content {
+            font-size: 14px;
+            color: #555;
+        }
+        .section {
+            margin-bottom: 8px;
+        }
+        a {
+            color: #1a73e8;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        table td {
+            font-size: 14px;
+            border: 1px solid #ccc;
+            text-align: left;
+            padding: 2px 5px;
+            box-sizing: border-box;
+        }
+        tr > td:first-child {
+            width: 80px;
+        }
+        tr > td:last-child {
+            width: calc(100%-80px);
+        }                    
+        table {
+          border-collapse: collapse;
+          width: 100%;
+          height: 100%;
+        }
+        </style>  
+    """
 
 
 class DDSFuzzDatePickerDialog(QDialog):
@@ -106,7 +163,7 @@ class CustomTableWidget(QTableWidget):
             self.app.delete_row(self)
         # 按下回车键 直接运行
         elif event.key() in (Qt.Key_Enter, Qt.Key_Return):
-            self.app.input_table_process()
+            self.app.input_table_combine()
         super().keyPressEvent(event)
 
 
@@ -164,13 +221,17 @@ class PopupView(QListView):
 
 class CustomLogText(QPlainTextEdit):
     """ 日志文本框"""
-    def __init__(self, max_lines=1000):
+    def __init__(self, max_lines=2000):
         super().__init__()
         self.max_lines = max_lines
+        self._setup_ui()
+
+    def _setup_ui(self):
         self.setReadOnly(True)
         self.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.setFont(QFont("Consolas", 10))  # 设置字体和字号
         self.setStyleSheet("QTextEdit {background-color: #f0f0f0;}")  # 设置背景色
+        self.setLineWrapMode(QPlainTextEdit.NoWrap)  # 禁用自动换行
 
     def contextMenuEvent(self, event):
         # 调用 QTextEdit 创建默认的右键菜单
@@ -182,17 +243,47 @@ class CustomLogText(QPlainTextEdit):
         menu.exec_(event.globalPos())
 
     def appendPlainText(self, text):
-        super().appendPlainText(text)
+        """ 原子化日志追加（关键改进点） """
+        cursor = QTextCursor(self.document())
         try:
-            if self.document().blockCount() > self.max_lines:
-                # 移除旧日志，保持日志行数
-                cursor = self.textCursor()
-                cursor.movePosition(cursor.Start)
-                cursor.select(cursor.BlockUnderCursor)
-                cursor.removeSelectedText()
-                cursor.deleteChar()
+            cursor.beginEditBlock()  # 开始原子操作
+
+            # 插入新日志（显式添加换行）
+            cursor.movePosition(QTextCursor.End)
+            cursor.insertText(f"{text}\n")
+
+            # 批量删除旧日志（性能优化关键）
+            self._trim_excess_lines(cursor)
+
+            cursor.endEditBlock()  # 结束原子操作
         except Exception as e:
-            logger.error(e)
+            logger.error(f"日志更新异常: {str(e)}", exc_info=True)
+            cursor.endEditBlock()  # 确保终止编辑块
+
+    def _trim_excess_lines(self, cursor):
+        """ 修剪多余行数（改进点：批量删除） """
+        excess = self.document().blockCount() - self.max_lines
+        if excess <= 0:
+            return
+
+        # 批量删除旧行
+        del_cursor = QTextCursor(self.document())
+        del_cursor.movePosition(QTextCursor.Start)
+
+        # 选择并删除前N行
+        for _ in range(excess):
+            del_cursor.select(QTextCursor.BlockUnderCursor)
+            del_cursor.removeSelectedText()
+            del_cursor.deleteChar()  # 删除换行符
+
+    def clear(self):
+        """ 安全清空内容 """
+        cursor = QTextCursor(self.document())
+        cursor.beginEditBlock()
+        try:
+            self.document().clear()
+        finally:
+            cursor.endEditBlock()
 
 
 class SafeLogHandler(QtCore.QObject):
@@ -206,12 +297,25 @@ class SafeLogHandler(QtCore.QObject):
 
     def __init__(self):
         super().__init__()
+        self.queue = queue.Queue()
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.process_queue)
+        self.timer.start(50)  # 每50ms处理队列
 
     def write(self, message):
-        try:
-            self.new_log.emit(message.strip())
-        except:
-            pass
+        """将消息放入线程安全队列"""
+        self.queue.put_nowait(message.strip())
+
+    def process_queue(self):
+        """ 主线程顺序处理 """
+        drained = []
+        while not self.queue.empty():
+            try:
+                drained.append(self.queue.get_nowait())
+            except queue.Empty:
+                break
+        if drained:
+            self.new_log.emit("\n".join(drained))  # 批量发送
 
     def flush(self):
         pass
@@ -238,11 +342,26 @@ class CustomerLogArea(QScrollArea):
         widget = QWidget()
         widget.setLayout(log_layout)
         self.setWidget(widget)
+        # 确保垂直滚动条自动到底部,当滚动范围变化时自动触发
+        # self.log_widget.verticalScrollBar().rangeChanged.connect(
+        #     lambda: self.log_widget.verticalScrollBar().setValue(
+        #         self.log_widget.verticalScrollBar().maximum()
+        #     )
+        # )
+        self.log_widget.verticalScrollBar().rangeChanged.connect(
+            self._auto_scroll
+        )
+
+    def _auto_scroll(self):
+        """ 智能滚动控制 """
+        scrollbar = self.log_widget.verticalScrollBar()
+        if scrollbar.value() >= scrollbar.maximum() - 50:  # 接近底部时自动滚动
+            scrollbar.setValue(scrollbar.maximum())
 
     def _append_new_log(self, text):
         try:
             self.log_widget.appendPlainText(text)
-            self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+            # self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
         except:
             pass
 

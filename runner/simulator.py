@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
-# @Email   : likun19941001@163.com
 # @Time    : 2024/1/31 13:28
 # @File    : simulator.py
 
@@ -152,16 +151,21 @@ class ConnectionHandle(threading.Thread):
         self.conn = connection
         self.resp_timeout = resp_timeout
         self.conn.setblocking(1)
+        self.stop_event = threading.Event()
+
+    def stop(self):
+        self.stop_event.set()
 
     def run(self) -> None:
-        while self.running:
+        logger.info(f'New ConnectProcess Running! ThreadID: {self.ident}')
+        while not self.stop_event.is_set():
             try:
-                header_data = self.conn.recv(8)  # 8 bytes = head(2) + payload type(2) + payload len(4)
-                if len(header_data) == 8:
-                    if header_data[0] == 0x02 and header_data[1] == 0xFD:  # correct 13400-2:2012 head
-                        payload_type = (header_data[2] << 8) + header_data[3]
-                        payload_len = ((header_data[4] << 24) + (header_data[5] << 16) + (header_data[6] << 8)
-                                       + header_data[7])
+                recv_data = self.conn.recv(8)  # 8 bytes = head(2) + payload type(2) + payload len(4)
+                if len(recv_data) == 8:
+                    if recv_data[0] == 0x02 and recv_data[1] == 0xFD:  # correct 13400-2:2012 head
+                        payload_type = (recv_data[2] << 8) + recv_data[3]
+                        payload_len = ((recv_data[4] << 24) + (recv_data[5] << 16) + (recv_data[6] << 8)
+                                       + recv_data[7])
                         payload_data = ''
                         if payload_len > 0:
                             payload_data = self.conn.recv(payload_len)
@@ -174,10 +178,10 @@ class ConnectionHandle(threading.Thread):
 
                         print_len = 30 if len(payload_data) > 30 else len(payload_data)
                         if print_len == 30:
-                            logger.info(f"doip request  : {header_data.hex()} "
+                            logger.info(f"doip request  : {recv_data.hex()} "
                                         f"{payload_data[0:4].hex()} {payload_data[4:print_len].hex()} ......")
                         else:
-                            logger.info(f"doip request  : {header_data.hex()} "
+                            logger.info(f"doip request  : {recv_data.hex()} "
                                         f"{payload_data[0:4].hex()} {payload_data[4:print_len].hex()}")
 
                         # Routing activation request
@@ -215,12 +219,16 @@ class ConnectionHandle(threading.Thread):
                             self.conn.close()
                     else:
                         logger.error("head error not 13400 frame")
-                    logger.info('-'*90)
+                    logger.info('-'*64)
+
+                elif not recv_data:
+                    logger.info(f'ConnectProcess exit! ThreadID: {self.ident}')
+                    break
 
             except Exception as e:
-                self.running = False
                 self.conn.close()
                 logger.error(e)
+                break
 
 
 class DoIPMonitorThread(threading.Thread):

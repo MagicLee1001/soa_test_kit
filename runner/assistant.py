@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
-# @Email   : likun19941001@163.com
 # @Time    : 2024/4/22 15:12
 # @File    : assistant.py
 

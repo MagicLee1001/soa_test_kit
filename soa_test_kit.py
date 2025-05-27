@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
-# @Email   : likun3@lixiang.com
 # @Time    : 2023/11/1 16:50
 # @File    : sil_xbp.py
-
 
 import os
 import sys
@@ -18,11 +16,16 @@ sys.path.append(workspace + '\\venv\\Lib')
 import time
 import json
 import traceback
+import glob
+import yaml
+import subprocess
+from threading import Thread
+from urllib.parse import unquote
 from runner.log import logger
 from functools import partial
 from PyQt5 import QtWidgets, QtGui, QtCore, sip
-from PyQt5.QtCore import Qt, QPoint, QRect, QSize, QModelIndex, pyqtSignal, QCoreApplication
-from PyQt5.QtGui import QStandardItemModel, QTextCursor, QFont, QIcon, QBrush, QPixmap, QColor, QTextOption
+from PyQt5.QtCore import Qt, QPoint, QRect, QSize, QModelIndex, pyqtSignal, QCoreApplication, QUrl, pyqtSlot
+from PyQt5.QtGui import QStandardItemModel, QFont, QIcon, QBrush, QPixmap, QColor, QTextOption, QDesktopServices
 from PyQt5.Qt import QStringListModel, QCompleter, QLineEdit, QListView, QMutex, QThread, QObject, QTimer
 from PyQt5.QtNetwork import QTcpServer, QTcpSocket, QHostAddress
 from PyQt5.QtWidgets import (
@@ -30,25 +33,56 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QHeaderView, QTableWidgetItem, QLabel, QCheckBox, QScrollArea, QTextEdit, QMessageBox, QFormLayout,
     QFrame, QAction, QFileDialog, QStyle, QStyleOptionViewItem, QStyleOptionButton, QInputDialog, QTabBar, QDialog,
     QComboBox, QListWidget, QListWidgetItem, QProgressBar, QMenu, QPlainTextEdit, QSplitter, QSizePolicy, QActionGroup,
-    QRadioButton, QButtonGroup, QMessageBox
+    QRadioButton, QButtonGroup, QMessageBox, QTextBrowser
 )
-from settings import env
+from settings import env, work_dir
 from connector.dds import DDSConnector, DDSConnectorRti
 from connector.sdc import SDCConnector
-from connector.ssh import SSHConnector
+from connector.ssh import SSHConnector, SSHAsyncConnector
+from connector.database import DBConnector
+from connector.doipclient import DoIPClient
+from connector.xcp import XCPConnector
+from runner.cloud import CloudConnector
 from runner.variable import Variable
 from runner.tester import CaseTester, TestPrecondition, TestPostCondition, TestHandle, CaseParser
 from runner.remote import Run, CallBack
 from runner.simulator import DoIPMonitorThread, VehicleModeDiagnostic
 from ui.worker import (
     AutoTestWorker, ReloadSettingWorker, RecoverEnvironment, ModifyConfigWordWorker, ReleaseWorker, GenTestCaseWorker,
-    LowCaseTransWorker, DeploySilNode, UndeploySilNode, DDSFuzzTest
+    LowCaseTransWorker, DeploySilNode, UndeploySilNode, DDSFuzzTest, FlaskThread
 )
 from ui.widgets import (
     CustomListWidget, CustomTableWidget, CustomTabBar, PopupView, ErrorDialog, CustomerLogArea, ECUSelectionDialog,
-    CustomSplashScreen, SilConnectionLabel, DDSFuzzDatePickerDialog
+    CustomSplashScreen, SilConnectionLabel, DDSFuzzDatePickerDialog, HTMLStatic
 )
 from ui.startup import PlatformConfigurationDialog
+
+# 这一部分是为了解决pyxcp模块打包后日志的问题
+# 在程序入口处添加以下代码
+import colorama
+colorama.deinit()  # 关闭colorama的ANSI转换
+# 在加载A2L配置前显式配置logging
+import logging.config
+logging.config.dictConfig({
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'level': 'DEBUG',
+            'formatter': 'simple'
+        },
+    },
+    'formatters': {
+        'simple': {
+            'format': '%(asctime)s | %(levelname)s | %(name)s: %(message)s'
+        }
+    },
+    'root': {
+        'level': 'INFO',
+        'handlers': ['console']
+    }
+})
 
 # 支持高dpi缩放
 QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
@@ -56,7 +90,8 @@ QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
 QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
 # 软件版本号
-__version__ = '24.5.13.beta-1.1'
+with open(os.path.join(work_dir, '.version'), 'r', encoding='utf-8') as f:
+    __version__ = f.read()
 
 
 class MainWindow(QMainWindow):
@@ -150,7 +185,7 @@ class MainWindow(QMainWindow):
         self.status_label.setAlignment(Qt.AlignLeft)
         self.footer_layout.addWidget(self.status_label)
         self.footer_layout.addStretch(1)  # 插入一个弹性空间
-        self.foot_label = QLabel(f"By likun3@lixiang.com 版本: {__version__}")
+        self.foot_label = QLabel(f"整车电动-车辆控制-李琨 | {__version__}")
         self.foot_label.setAlignment(Qt.AlignRight)
         self.footer_layout.addWidget(self.foot_label)
         # 创建一个新的垂直布局
@@ -184,6 +219,7 @@ class MainWindow(QMainWindow):
         self.auto_test_worker = AutoTestWorker(self)
         self.auto_test_worker.started.connect(self.on_auto_test_start)
         self.auto_test_worker.finished.connect(self.on_auto_test_finish)
+        self.auto_test_worker.suite_result_path.connect(self.display_result_html_path)
         # 加载配置线程
         self.reload_setting_worker = ReloadSettingWorker(self)
         self.reload_setting_worker.display_case_path_signal.connect(self.display_case_paths)
@@ -222,6 +258,12 @@ class MainWindow(QMainWindow):
         logger.info('初始化时默认打开远程执行开关')
         # 初始化时默认打开远程执行开关
         self.remote_execute_listen()
+        # 启动Flask服务器
+        self.flask_thread = FlaskThread(self)
+        self.flask_thread.start()
+
+        # 初始化时更新界面数据
+        self.set_auto_run_text()
 
     def init_window(self):
         self.resize(env.width, env.height)
@@ -330,7 +372,7 @@ class MainWindow(QMainWindow):
             if self.remote_tool_color == 'black':
                 self.tcp_server = QTcpServer(self)
                 logger.info('TCP Server open.')
-                if not self.tcp_server.listen(QHostAddress.LocalHost, 54321):
+                if not self.tcp_server.listen(QHostAddress.LocalHost, 36666):
                     logger.error(f'Failed to listen: {self.errorString()}')
                     self.tcp_server.close()
                 else:
@@ -369,7 +411,7 @@ class MainWindow(QMainWindow):
                 if event_type == 'remote_autotest':
                     event_data = parse_data.get('event_data')
                     env.remote_event_data = event_data  # 远程执行参数信息
-                    if event_data.get('task_id') and not self.auto_test_worker.isRunning():
+                    if event_data.get('case_path') and not self.auto_test_worker.isRunning():
                         # 切换至自动化页面
                         if self.tabs.currentIndex() != 0:
                             self.tabs.setCurrentIndex(0)
@@ -478,16 +520,22 @@ class MainWindow(QMainWindow):
             if filepath:
                 self.current_file_paths[current_tab_index] = filepath
                 left_table, right_table = self.tables[current_tab_index]
-                with open(filepath, 'w') as f:
-                    for row in range(left_table.rowCount()):
-                        # checkbox = left_table.cellWidget(row, 0)
-                        signal = left_table.cellWidget(row, 0).text() if left_table.cellWidget(row, 0) else ""
-                        value = left_table.item(row, 1).text() if left_table.item(row, 1) else ""
-                        f.write(f'1;;{signal};;{value}\n')
-                    for row in range(right_table.rowCount()):
-                        signal = right_table.cellWidget(row, 0).text() if right_table.cellWidget(row, 0) else ""
-                        value = right_table.item(row, 1).text() if right_table.item(row, 1) else ""
-                        f.write(f'2;;{signal};;{value}\n')
+                file_content = {'input': [], 'output': []}
+
+                for row in range(left_table.rowCount()):
+                    signal = left_table.cellWidget(row, 0).text() if left_table.cellWidget(row, 0) else ""
+                    value = left_table.item(row, 1).text() if left_table.item(row, 1) else ""
+                    file_content['input'].append({'signal': signal, 'value': value})
+                    # f.write(f'1;;{signal};;{value}\n')
+                for row in range(right_table.rowCount()):
+                    signal = right_table.cellWidget(row, 0).text() if right_table.cellWidget(row, 0) else ""
+                    value = right_table.item(row, 1).text() if right_table.item(row, 1) else ""
+                    file_content['output'].append({'signal': signal, 'value': value})
+                        # f.write(f'2;;{signal};;{value}\n')
+                # 转成yaml格式
+                yaml_str = yaml.dump(file_content, allow_unicode=True)
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(yaml_str)
                 # 另存完后改名
                 saved_tab_name = os.path.splitext(os.path.basename(filepath))[0]
                 self.tabs.setTabText(current_tab_index, saved_tab_name)
@@ -503,15 +551,19 @@ class MainWindow(QMainWindow):
                     self.save_configuration_as()
                 else:
                     left_table, right_table = self.tables[current_tab_index]
-                    with open(current_file_path, 'w') as f:
-                        for row in range(left_table.rowCount()):
-                            signal = left_table.cellWidget(row, 0).text() if left_table.cellWidget(row, 0) else ""  # cellWidget(row, 1)
-                            value = left_table.item(row, 1).text() if left_table.item(row, 1) else ""  # item(row, 1)
-                            f.write(f'1;;{signal};;{value}\n')
-                        for row in range(right_table.rowCount()):
-                            signal = right_table.cellWidget(row, 0).text() if right_table.cellWidget(row, 0) else ""
-                            value = right_table.item(row, 1).text() if right_table.item(row, 1) else ""
-                            f.write(f'2;;{signal};;{value}\n')
+                    file_content = {'input': [], 'output': []}
+                    for row in range(left_table.rowCount()):
+                        signal = left_table.cellWidget(row, 0).text() if left_table.cellWidget(row, 0) else ""
+                        value = left_table.item(row, 1).text() if left_table.item(row, 1) else ""
+                        file_content['input'].append({'signal': signal, 'value': value})
+                    for row in range(right_table.rowCount()):
+                        signal = right_table.cellWidget(row, 0).text() if right_table.cellWidget(row, 0) else ""
+                        value = right_table.item(row, 1).text() if right_table.item(row, 1) else ""
+                        file_content['output'].append({'signal': signal, 'value': value})
+                    # 转成yaml格式
+                    yaml_str = yaml.dump(file_content, allow_unicode=True)
+                    with open(current_file_path, 'w', encoding='utf-8') as f:
+                        f.write(yaml_str)
         except:
             logger.error(traceback.format_exc())
 
@@ -529,21 +581,27 @@ class MainWindow(QMainWindow):
                 # 更新当前标签页的文件路径
                 self.current_file_paths[current_tab_index] = filepath
                 left_table, right_table = self.tables[current_tab_index]
-                with open(filepath, 'r') as f:
-                    lines = f.readlines()
-                    # 分别加载输入和输出的表格
-                    num_left_rows = 0
-                    num_right_rows = 0
-                    left_lines = []
-                    right_lines = []
-                    for row, line in enumerate(lines):
-                        table_type, signal, value = line.strip().split(';;')
-                        if table_type == '1':
-                            num_left_rows += 1
-                            left_lines.append((signal, value))
-                        else:
-                            num_right_rows += 1
-                            right_lines.append((signal, value))
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f)
+                    left_lines = data.get('input')
+                    right_lines = data.get('output')
+                    num_left_rows = len(left_lines) if left_lines else 0
+                    num_right_rows = len(right_lines) if right_lines else 0
+
+                    # lines = f.readlines()
+                    # # 分别加载输入和输出的表格
+                    # num_left_rows = 0
+                    # num_right_rows = 0
+                    # left_lines = []
+                    # right_lines = []
+                    # for row, line in enumerate(lines):
+                    #     table_type, signal, value = line.strip().split(';;')
+                    #     if table_type == '1':
+                    #         num_left_rows += 1
+                    #         left_lines.append((signal, value))
+                    #     else:
+                    #         num_right_rows += 1
+                    #         right_lines.append((signal, value))
 
                     # 首先确定行数，如果需要的话，添加额外的行
                     num_left_rows_needed = num_left_rows - left_table.rowCount()
@@ -558,14 +616,14 @@ class MainWindow(QMainWindow):
 
                     # 然后加载表格数据
                     for row, line in enumerate(left_lines):
-                        signal, value = line
+                        signal, value = line['signal'], line['value']
                         # left_table.cellWidget(row, 0).setCheckState(int(checkbox_state))
                         left_table.cellWidget(row, 0).setText(signal)
                         if not left_table.item(row, 1):  # 防止这行没有单元格项目
                             left_table.setItem(row, 1, QTableWidgetItem())
                         left_table.item(row, 1).setText(value)
                     for row, line in enumerate(right_lines):
-                        signal, value = line
+                        signal, value = line['signal'], line['value']
                         right_table.cellWidget(row, 0).setText(signal)
         except:
             logger.error(traceback.format_exc())
@@ -607,9 +665,10 @@ class MainWindow(QMainWindow):
                             raise Exception(f'{signal.name}={signal_value} value convert error')
                         # if signal.data_array[-1] != signal_value:  # 当前值有修改则发送, 2024.02.20 沟通需求确认均发送
                         signal.Value = signal_value
-                        env.tester.send_single_msg(signal)
+                        env.tester.send_single_msg(signal, async_mode=True)
                     except Exception as e:
                         logger.error(e)
+                        logger.error(traceback.format_exc())
         else:
             # 自动化测试执行窗口
             if not self.auto_test_worker.isRunning():
@@ -621,6 +680,52 @@ class MainWindow(QMainWindow):
                 TestHandle.run_state = '停止中'
                 env.stop_autotest = True
                 self.run_tool.setEnabled(False)
+
+    def input_table_combine(self):
+        """
+        回车按下时，聚合发送：同一topic下的信号set_value完以后在write过去
+        """
+        current_table_index = self.tabs.currentIndex()
+        # 手动调试窗口
+        if current_table_index >= 1:
+            # 从字典中获取当前选项卡的左、右 table_widget
+            left_table_widget, right_table_widget = self.tables[current_table_index]
+            # 取消table焦点 防止处于编辑中的数据不生效
+            left_table_widget.clearFocus()
+            left_table_widget.setFocus()
+            # 依次查找一组dds消息，按顺序发送，先到先得
+            dds_multi_signals = {}
+            for row in range(left_table_widget.rowCount()):
+                signal_name = left_table_widget.cellWidget(row, 0).text() if left_table_widget.cellWidget(row, 0) else ""
+                # 假设“值”列的数据是直接以文字形式储存在单元格里的
+                value = left_table_widget.item(row, 1).text()
+                if signal_name and value != '':
+                    try:
+                        signal = Variable(signal_name)
+                        signal_value = CaseTester.convert_signal_value(value)
+                        if signal_value is None:
+                            raise Exception(f'{signal.name}={signal_value} value convert error')
+                        signal.Value = signal_value
+
+                        if not any(signal.name.startswith(prefix) for prefix in CaseTester.non_dds_prefix):  # 添加DDS信号组
+                            topic_name = env.tester.dds_connector.signal_map[signal_name]
+                            if topic_name and topic_name not in dds_multi_signals:
+                                dds_multi_signals[topic_name] = []
+                                dds_multi_signals[topic_name].append(signal)
+                            else:
+                                dds_multi_signals[topic_name].append(signal)
+                        else:  # 不是dds的直接发送
+                            env.tester.send_single_msg(signal, async_mode=True)
+                    except Exception as e:
+                        logger.error(traceback.format_exc())
+                        logger.error(e)
+            # 最后依次发送dds信号组
+            for tpn, s in dds_multi_signals.items():
+                if tpn and s:
+                    env.tester.dds_connector.dds_multi_send(
+                        topic_name=tpn,
+                        signals=s
+                    )
 
     def insert_left_row(self, table_widget):
         row_position = table_widget.rowCount()
@@ -799,15 +904,29 @@ class MainWindow(QMainWindow):
         # 左侧部分
         left_layout = QVBoxLayout()
         hlayout.addLayout(left_layout)
+
         # 左侧第一行
         l_setting_layout = QHBoxLayout()
+        # 左侧第一行左边
         self.select_setting_btn = QPushButton('选择配置')
         self.select_setting_btn.clicked.connect(self.select_setting)
         l_setting_layout.addWidget(self.select_setting_btn)
         self.setting_file = QLineEdit()
         self.setting_file.setPlaceholderText(env.settings_filepath)
-        l_setting_layout.addWidget(self.setting_file)
+        l_setting_layout.addWidget(self.setting_file, 3)
+        # 添加伸缩项分隔左右部分
+        l_setting_layout.addStretch(1)
+        # 右侧新增部分
+        r_press_layout = QHBoxLayout()
+        tag_label = QLabel("压测次数:")
+        self.tag_input = QLineEdit()
+        self.tag_input.setText('1')
+        self.tag_input.textChanged.connect(self.handle_press_changed)  # 绑定文本改变信号
+        r_press_layout.addWidget(tag_label)
+        r_press_layout.addWidget(self.tag_input)
+        l_setting_layout.addLayout(r_press_layout, stretch=1)
         left_layout.addLayout(l_setting_layout)
+
         # 左侧第二行
         l_case_layout = QVBoxLayout()
         l_case_btn_group_layout = QHBoxLayout()
@@ -859,16 +978,40 @@ class MainWindow(QMainWindow):
             """)
         process_layout.addWidget(self.process_bar)
         right_layout.addLayout(process_layout)
-        # 右侧第二行
-        self.auto_run_text = QTextEdit()
+        # 右侧第三行
+        self.auto_run_text = QTextBrowser()
         self.auto_run_text.setFont(QFont("Consolas", 12))  # 设置字体和字号
-        self.auto_run_text.setReadOnly(True)
-        right_layout.addWidget(self.auto_run_text)
+        self.auto_run_text.setOpenExternalLinks(True)
+        self.auto_run_text.setOpenLinks(False)
+        self.auto_run_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 确保 QTextBrowser 可以扩展
+        right_layout.addWidget(self.auto_run_text, stretch=1)  # Add QWidget with stretch to allow expansion
+        self.auto_run_text.anchorClicked.connect(self.open_link)   # 连接点击事件到队列函数
+
+        # 右侧第四行
+        self.result_path_text = QTextBrowser()
+        self.result_path_text.setFont(QFont("Consolas", 12))  # 设置字体和字号
+        self.result_path_text.setOpenExternalLinks(True)
+        self.result_path_text.setOpenLinks(False)
+        self.result_path_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)  # 确保 QTextBrowser 可以扩展
+        self.result_path_text.anchorClicked.connect(self.open_link)  # 连接点击事件到队列函数
+        right_layout.addWidget(self.result_path_text, stretch=1)  # Add QWidget with stretch to allow expansion
+
         # 设置布局的边距为0，使得布局之间紧密排布
         for layout in (main_layout, hlayout, left_layout, right_layout, l_setting_layout,
                        l_case_layout, l_sw_info_layout, process_layout):
             layout.setContentsMargins(0, 0, 0, 0)
         return home_page
+
+    def open_link(self, url):
+        logger.info(f'打开文件链接: {url}')
+        # 解码 URL 中的特殊字符
+        url_str = unquote(url.toString())
+
+        # 打开链接到默认浏览器
+        if url_str.startswith('file:///'):
+            QDesktopServices.openUrl(QUrl(url_str))
+        else:
+            logger.warning(f'无效的URL: {url_str}')
 
     def modify_config_word(self):
         self.modify_cw_worker.start()
@@ -921,6 +1064,17 @@ class MainWindow(QMainWindow):
         self.run_tool.setIcon(QIcon(f'ui/icons/Pause_black.svg'))
         self.run_tool.setToolTip('停止')
 
+    def handle_press_changed(self, text):
+        try:
+            if not text:
+                env.press_times = 1
+            else:
+                env.press_times = int(text)
+        except:
+            logger.error(f'请修改压测次数为正确的类型')
+        else:
+            logger.success(f'当前压测次数为: {env.press_times}')
+
     def on_auto_test_finish(self):
         try:
             logger.info(f'停止自动化测试, 测试信息停止更新, 按钮还原')
@@ -934,18 +1088,42 @@ class MainWindow(QMainWindow):
         except:
             logger.error(traceback.format_exc())
 
+    def display_result_html_path(self, suite_result_paths):
+        try:
+            html_template = f"""
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                {HTMLStatic.table_style} 
+            </head>
+            <body>
+                <div class="container">
+                    <table>
+            """
+            for status, result_path in suite_result_paths:
+                filepath = result_path.replace('\\', '/')
+                html_template += f"""<tr><td>{status}</td><td><a href="file:///{filepath}">{os.path.basename(result_path)}</a></td></tr>"""
+            html_template += "</table></div></body></html>"
+            self.result_path_text.setHtml(html_template)
+        except:
+            logger.error(traceback.format_exc())
+
     def set_env_testcase(self):
         try:
             # 远程执行触发参数
             if env.remote_event_data:
-                env.remote_run = Run(
-                    server=env.remote_event_data['server'],
-                    task_id=env.remote_event_data['task_id'],
-                    distribute_id=env.remote_event_data['distribute_id']
-                )
-                self.case_filepaths, result_case_path = env.remote_run.parse_case()
+                case_path = env.remote_event_data['case_path']
+                if case_path.startswith('http'):  # 从svn拉下来
+                    env.remote_run = Run(
+                        server=env.remote_event_data['server'],
+                        task_id=env.remote_event_data['task_id'],
+                        distribute_id=env.remote_event_data['distribute_id']
+                    )
+                    self.case_filepaths, result_case_path = env.remote_run.parse_case_by_svn_path(case_path)
+                else:  # 直接获取本地路径
+                    self.case_filepaths = glob.glob(os.path.normpath(os.path.join(case_path.replace('"', ''), '*.xlsm')))
                 self.display_case_paths()  # 显示用例列表
-                env.remote_callback = CallBack()
+                # env.remote_callback = CallBack()
             env.ddt_testcase = []
             for tc_filepath in self.case_filepaths:
                 tc_filename = os.path.basename(tc_filepath)
@@ -962,7 +1140,7 @@ class MainWindow(QMainWindow):
                 ]
                 suite_info = {
                     'tc_filepath': tc_filepath,
-                    'suite_name': tc_filename,
+                    'suite_name': os.path.splitext(tc_filename)[0],
                     'testcases': testcases
                 }
                 env.ddt_testcase.append(suite_info)
@@ -973,17 +1151,56 @@ class MainWindow(QMainWindow):
     def set_auto_run_text(self):
         """所有的GUI操作更新都要放在主线程中"""
         try:
-            text_fmt = f"执行时间: {TestHandle.start_time}\n" \
-                       f"测试状态: {TestHandle.run_state}\n" \
-                       f"用例总数: {TestHandle.all_case_num}\n" \
-                       f"已经执行: {TestHandle.total_num}\n" \
-                       f"通过数量: {TestHandle.pass_num}\n" \
-                       f"失败数量: {TestHandle.fail_num}\n" \
-                       f"通过率  : {TestHandle.current_pass_rate}\n" \
-                       f"当前用例: {TestHandle.current_running_case}\n" \
-                       f"报告路径: {TestHandle.report_html_path}"
-            self.auto_run_text.clear()
-            self.auto_run_text.setText(text_fmt)
+            filepath_link = TestHandle.report_html_path.replace('\\', '/')
+            html_template = f"""
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                {HTMLStatic.table_style}        
+            </head>
+            <body>
+                <div class="container">
+                    <table>
+                        <tr>
+                            <td>执行时间</td>
+                            <td>{TestHandle.start_time}</td>
+                        </tr>
+                        <tr>
+                            <td>测试状态</td>
+                            <td>{TestHandle.run_state}</td>
+                        </tr>
+                        <tr>
+                            <td>用例总数</td>
+                            <td>{TestHandle.all_case_num}</td>
+                        </tr>
+                        <tr>
+                            <td>已经执行</td>
+                            <td>{TestHandle.total_num}</td>
+                        </tr>
+                        <tr>
+                            <td>通过数量</td>
+                            <td>{TestHandle.pass_num}</td>
+                        </tr>
+                        <tr>
+                            <td>失败数量</td>
+                            <td>{TestHandle.fail_num}</td>
+                        </tr>                        
+                        <tr>
+                            <td>通过率</td>
+                            <td>{TestHandle.current_pass_rate}</td>
+                        </tr>
+                        <tr>
+                            <td>当前用例</td>
+                            <td>{TestHandle.current_running_case}</td>
+                        </tr>
+                        <tr>
+                            <td>报告路径</td>
+                            <td><a href="file:///{filepath_link}">{os.path.basename(TestHandle.report_html_path)}</a></td>
+                        </tr>
+            """
+            html_template += "</table></div></body></html>"
+
+            self.auto_run_text.setHtml(html_template)
             if TestHandle.all_case_num:
                 self.process_bar.setValue(int(round(TestHandle.total_num / TestHandle.all_case_num, 2) * 100))
             else:
@@ -996,11 +1213,20 @@ class MainWindow(QMainWindow):
         显示当前被测设备软件信息
         """
         try:
-            text_fmt = ""
+            html_template = f"""
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                {HTMLStatic.table_style}        
+            </head>
+            <body>
+                <div class="container">
+                    <table>
+            """
             for key, val in env.xcu_info.items():
-                text_fmt += f"{key}:\n{val}\n\n"
-            self.sw_info_text.clear()
-            self.sw_info_text.setText(text_fmt)
+                html_template += f'<tr><td>{key}</td><td>{val}</td></tr>'
+            html_template += '</table></div></body></html>'
+            self.sw_info_text.setHtml(html_template)
         except Exception:
             logger.error(traceback.format_exc())
 
@@ -1075,25 +1301,67 @@ class SetupWorker(QObject):
         try:
             # ssh connector要先启动
             self.progress.emit('Initialize SSHConnector...')
-            env.ssh_connector = SSHConnector(hostname=env.ssh_hostname, username=env.ssh_username,
-                                             password=env.ssh_password)
+            try:
+                env.ssh_connector = SSHConnector(hostname=env.ssh_hostname, username=env.ssh_username, password=env.ssh_password, port=env.ssh_port)
+            except:
+                self.progress.emit('SSHConnector 初始化失败')
+                logger.error(traceback.format_exc())
+                # 不影响用户正常使用其他soa功能如dds
+                env.ssh_connector = None
+            try:
+                env.ssh_async_connector = SSHAsyncConnector(hostname=env.ssh_hostname, username=env.ssh_username, password=env.ssh_password, port=env.ssh_port)
+            except:
+                self.progress.emit('SSHAsyncConnector 初始化失败')
+                logger.error(traceback.format_exc())
+                env.ssh_async_connector = None
             self.progress.emit('Initialize SDCConnector...')
-            env.sdc_connector = SDCConnector(env.dbo_filepath, server_ip=env.sil_server_ip,
-                                             server_port=env.sil_server_port)
+            env.sdc_connector = SDCConnector(env.dbo_filepath, server_ip=env.sil_server_ip, server_port=env.sil_server_port)
             self.progress.emit('Initialize DDSConnector...')
             # env.dds_connector = DDSConnectorRti(idl_filepath=env.idl_filepath)
+            logger.info(env.idl_filepath)
+            logger.info(env.sub_topics)
+            logger.info(env.pub_topics)
             env.dds_connector = env.DDSConnectorClass(idl_filepath=env.idl_filepath) \
-                if hasattr(env, 'DDSConnectorClass') else DDSConnectorRti(idl_filepath=env.idl_filepath)
+                if env.DDSConnectorClass else DDSConnectorRti(idl_filepath=env.idl_filepath)
+            self.progress.emit('Initialize DBConnector...')
+            env.db_connector = DBConnector()
+            self.progress.emit('Initialize DoIPClient...')
+            doipclient_config = env.additional_configs.get('doipclient')
+            if doipclient_config:
+                env.doipclient = DoIPClient(
+                    server_ip=doipclient_config['server_ip'],
+                    server_port=doipclient_config['server_port'],
+                    client_logical_addr=doipclient_config['client_logical_addr'],
+                    server_logical_addr=doipclient_config['server_logical_addr'],
+                    uds_timeout=doipclient_config['uds_timeout'],
+                    security_level=doipclient_config['security_level'],
+                    security_mask=doipclient_config['security_mask']
+                )
+            else:
+                env.doipclient = DoIPClient()
+            self.progress.emit('Initialize CloudConnector...')
+            env.cloud_connector = CloudConnector()
             self.progress.emit('Initialize DoIPSimulator...')
             env.doip_simulator = DoIPMonitorThread()
             self.progress.emit('Initialize CaseTester...')
+            a2l_filepath = os.path.normpath(env.additional_configs.get('xcp', {}).get('a2l'))
+            if os.path.exists(a2l_filepath):
+                env.xcp_connector = XCPConnector(a2l_filepath)
+            else:
+                logger.warning('没有指定标定a2l文件，请检查并添加配置到 data\\conf\\additional.json')
+                env.xcp_connector = None
             env.tester = CaseTester(
                 sub_topics=env.sub_topics,
                 pub_topics=env.pub_topics,
                 sdc_connector=env.sdc_connector,
                 dds_connector=env.dds_connector,
                 ssh_connector=env.ssh_connector,
-                doip_simulator=env.doip_simulator
+                ssh_async_connector=env.ssh_async_connector,
+                doip_simulator=env.doip_simulator,
+                db_connector=env.db_connector,
+                cloud_connector=env.cloud_connector,
+                doipclient=env.doipclient,
+                xcp_connector=env.xcp_connector
             )
             self.progress.emit('Initialize TestPrecondition ...')
             TestPrecondition(env.tester, callback=self.progress).run()
@@ -1156,6 +1424,9 @@ def main():
                     env.dds_connector.dds_proxy.clear()
                 except:
                     pass
+                # QThread线程关闭，不然主窗口退出后会告警
+                new_thread.quit()  # 退出线程
+                new_thread.wait()  # 等待线程退出
                 sys.exit(-1)
             elif result is True:
                 # main_window = MainWindow(backend_thread=new_thread)

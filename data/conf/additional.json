@@ -1,0 +1,14 @@
+{
+  "doipclient": {
+    "server_ip": "172.31.10.31",
+    "server_port": 13400,
+    "client_logical_addr": "0e02",
+    "server_logical_addr": "0c01",
+    "uds_timeout": 5,
+    "security_level": 1,
+    "security_mask": "30002212"
+  },
+  "xcp": {
+    "a2l": "D:\\Project\\soa-sil-xbp\\data\\matrix\\XCU_M_XAP3.3.4-release-SW05EB-ID0000-CAL00-BSW180701.20250417-1028_ETH.a2l"
+  }
+}

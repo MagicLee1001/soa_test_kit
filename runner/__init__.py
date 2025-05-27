@@ -28,10 +28,12 @@ def run_tests_output_html_report(
         'TestReport_%s_%s.htm' % (case_name, time.strftime("%Y-%m-%d-%H_%M_%S", time.localtime(time.time())))
     )
     with open(report_path, 'wb') as fp:
-        runner = htmler.HTMLTestRunner(stream=fp,
-                                               verbosity=verbosity,
-                                               title=html_report_title,
-                                               description=description,
-                                               tester=tester)
+        runner = htmler.HTMLTestRunner(
+                stream=fp,
+                verbosity=verbosity,
+                title=html_report_title,
+                description=description,
+                tester=tester
+        )
         result = runner.run(suite)
         return result, report_path

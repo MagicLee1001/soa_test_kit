@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
-# @Email   : likun19941001.com
+# @Email   : likun19941001@163.com
 # @Time    : 2023/10/25 15:05
 # @File    : ssh.py
 
@@ -10,11 +10,18 @@ import json
 import sys
 import time
 import re
+import tempfile
+import traceback
+import yaml
 import paramiko
+import threading
+import select
+from decorator import decorator
 from paramiko.ssh_exception import SSHException
 from functools import wraps
 from runner.log import logger
-from settings import env
+from pathlib import Path
+from settings import work_dir, env
 from runner.variable import Variable
 
 
@@ -40,31 +47,48 @@ def time_exceeded_callback(start_time, time_limit=5):
         raise TimeLimitExceeded
 
 
-def check_connections(func):
-    """ssh重连装饰器"""
-    @wraps(func)
-    def deco(self, *args, **kwargs):
-        try:
-            # 尝试执行函数，如果连接正常则直接返回结果
-            if self._client and self._client.get_transport().is_active():
-                return func(self, *args, **kwargs)
-            else:
-                # 连接不正常，尝试重新连接
-                logger.warning('ssh client transport inactive or lost.')
-                self._connect()
-        except (SSHException, OSError) as e:
-            # 捕获到SSH连接异常，记录日志并尝试重连
-            logger.warning(f'SSH connection error during function execution: {e}')
-            self._connect()
-        # 重连后再次尝试执行函数
-        return func(self, *args, **kwargs)
+# def check_connections(func):
+#     """ssh重连装饰器"""
+#     @wraps(func)
+#     def deco(self, *args, **kwargs):
+#         try:
+#             # 尝试执行函数，如果连接正常则直接返回结果
+#             if self._client and self._client.get_transport().is_active():
+#                 return func(self, *args, **kwargs)
+#             else:
+#                 # 连接不正常，尝试重新连接
+#                 logger.warning('ssh client transport inactive or lost.')
+#                 self._connect()
+#         except (SSHException, OSError) as e:
+#             # 捕获到SSH连接异常，记录日志并尝试重连
+#             logger.warning(f'SSH connection error during function execution: {e}')
+#             self._connect()
+#         # 重连后再次尝试执行函数
+#         return func(self, *args, **kwargs)
+#
+#     return deco
 
-    return deco
+
+@decorator
+def check_connections(func, self, *args, **kwargs):
+    try:
+        # 尝试执行函数，如果连接正常则直接返回结果
+        if self._client and self._client.get_transport().is_active():
+            return func(self, *args, **kwargs)
+        else:
+            # 连接不正常，尝试重新连接
+            logger.warning('ssh client transport inactive or lost.')
+            self._connect()
+    except (SSHException, OSError) as e:
+        # 捕获到SSH连接异常，记录日志并尝试重连
+        logger.warning(f'SSH connection error during function execution: {e}')
+        self._connect()
+    return func(self, *args, **kwargs)
 
 
 class SSHClient:
     ''' 远程连接Linux类 '''
-    def __init__(self, hostname, username, password, port=22, connection_timeout=5, retry_times=3, p_key=None):
+    def __init__(self, hostname, username, password, port=22, connection_timeout=15, retry_times=3, p_key=None):
         self.hostname = hostname
         self.username = username
         self.password = password
@@ -72,7 +96,6 @@ class SSHClient:
         # 连接超时时间 单位秒 如果是端口错误不计入连接超时
         self.connection_timeout = connection_timeout
         self.retry_times = retry_times
-        self.invoke_exit = False
         self._client = None
         self._transport = None
         self._channel = None
@@ -99,16 +122,14 @@ class SSHClient:
         self._connect()
 
     def __del__(self):
-        '''
-        关闭ssh连接
-        _client关闭后也会直接关闭_transport的应用
-        因此_transport不需要再关闭了
-        '''
+        """
+        关闭ssh连接, _client关闭后也会直接关闭_transport的应用, 因此_transport不需要再关闭了
+        """
         try:
             self._client.close()
         except:
             pass
-        logger.info('SSH Client 连接通道已关闭')
+        logger.info('SSHClient 连接通道已关闭')
 
     def close(self):
         self.__del__()
@@ -145,7 +166,10 @@ class SSHClient:
                         self.need_private_auth = True
 
                 except paramiko.ssh_exception.AuthenticationException as e:
-                    raise SSHAuthFailed
+                    try:
+                        self._client.get_transport().auth_none('root')
+                    except:
+                        raise SSHAuthFailed
 
                 except Exception as e:
                     logger.error(f'{self.hostname} connect fail: {str(e)}, retry {i} times, total retry {self.retry_times}')
@@ -268,7 +292,20 @@ class SSHClient:
 
     @check_connections
     def execute_interact_cmd(self, cmd, timeout=10, tail='# ', exit_condition=None, buffer_size=1024, console=False):
-        """这个方法每次使用都是一个独立的channel，不适合连续作业"""
+        """
+        只执行一次交互式指令，调用此方法，每次只开启一次管道，一次交互，不适合在管道内连续作业
+        注意避免线程资源竞争，不在多线程中同时执行此方法
+        Args:
+            cmd: 交互式指令
+            timeout: 管道超时时间
+            tail: 管道结束符指令符
+            exit_condition: 管道退出条件
+            buffer_size: 一次接收最大字节数
+            console: 日志打印开关
+
+        Returns:
+
+        """
         output_buffer = ''
         pwd_info = 'password: '
         ask = '(yes/no)? '
@@ -302,11 +339,6 @@ class SSHClient:
                 # 有询问密钥认证之类的对话框
                 elif output_buffer.endswith(ask):
                     self._channel.send('yes' + '\n')
-                # timeout阻塞时，这个条件走不到
-                elif self.invoke_exit:
-                    logger.info('Receive invoke exit flag and close channel')
-                    self._channel.close()
-                    return output_buffer
                 elif exit_condition and exit_condition in output:
                     self._channel.send('\x03')  # 发送 Ctrl-C
                     self._channel.close()
@@ -319,23 +351,90 @@ class SSHClient:
 class SSHConnector(SSHClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        Variable('sql3_switch').Value = 0
+        self.vin = ''
         self.vin_filepath = '/app_data/common/vin.json'
         self.cfg_wd_filepath = '/app_data/common/cfgwd.json'
         self.vcs_ip_config_filepath = '/apps/x01/etc/vcs/ip_config.json'
+        self.vss_cli_filepath = '/apps/x01/bin/vss-cli'
+        self.eid_fid_cli_remote_filepath = '/apps/x01/bin/eid_fid_cli'
+        self.service_manager_sdf_path = '/apps/framework/sdf/service_manager.yaml'
+        self.db_path = {
+            'vcs': '/app_data/vcs/vcs_v1.db',
+            'rule': '/app_data/rule/iot/rmeta_topic/db/rule.db'
+        }
+        self.table_name = {
+            'd': 'config_store_double',
+            'i': 'config_store_int',
+            's': 'config_store_string'
+        }
+        # 初始化时要做的事情
+        self.initialize()
+
+    def initialize(self, callback=None):
+        if callback:
+            callback.emit(f'ssh连接器 部署sil仿真节点到被测端 ...')
+        logger.info('>>> ssh连接器 sil仿真节点部署 ...')
+        # 对比远端dbo文件并更新
         self.update_dbo_file()
+        # 获取xcu软件信息
+        if callback:
+            callback.emit(f'ssh连接器 获取被测软件信息 ...')
         self.get_xcu_info()
+        # 添加sshconnector下的所以相关信号变量
         self.add_channel_cmd_signals()
-        # self.put_sil_server()  # 放到PreCondition运行
+        # 放置vss-cli
+        if callback:
+            callback.emit(f'ssh连接器 上传vss_cli ...')
+        self.put_vss_cli()
+        # 故障注入文件放置
+        if callback:
+            callback.emit(f'ssh连接器 上传eid_fid_cli ...')
+        self.put_eid_fid_cli_file()
+        # sdf总控文件先配置好
+        if env.platform_name == 'XDP':
+            self.add_sdf_to_service_manager_file()
+        # 放置sil文件
+        if callback:
+            callback.emit(f'ssh连接器 上传sil ...')
+        self.put_sil_server()  # 放到PreCondition运行
+        if callback:
+            callback.emit(f'ssh连接器 vcsDB信号初始化 ...')
+        logger.info('>>> ssh连接器 vcsDB信号初始化 ...')
+        self.get_db_signals(db_name='vcs', table_type='i')
+        self.get_db_signals(db_name='vcs', table_type='d')
+        self.get_db_signals(db_name='vcs', table_type='s')
+        logger.info('>>> ssh连接器 ruleDB信号初始化 ...')
+        self.get_db_signals(db_name='rule', table_type='i')
+        self.get_db_signals(db_name='rule', table_type='d')
+        self.get_db_signals(db_name='rule', table_type='s')
+        time.sleep(1)
+
+    def uninitialize(self):
+        self.close()
 
     def add_channel_cmd_signals(self):
         """
         将终端命令行操作设置成信号
         Returns:
         """
+        # 读数据库的事件
+        Variable('sql3_switch_vcs_i').Value = 0
+        Variable('sql3_switch_vcs_d').Value = 0
+        Variable('sql3_switch_vcs_s').Value = 0
+        Variable('sql3_switch_rule_i').Value = 0
+        Variable('sql3_switch_rule_d').Value = 0
+        Variable('sql3_switch_vcs_s').Value = 0
+        # ssh交互动作
         Variable('ssh_exec_cmd').Value = ''
-        Variable('ssh_interactive_cmd').Value = ''
         Variable('ssh_exec_output').Value = ''
+        Variable('ssh_sftp_get').Value = ''
+        Variable('ssh_sftp_put').Value = ''
+        # vss交互动作
+        Variable('vss_').Value = ''
+        Variable('vss_get').Value = ''
+        Variable('vssSet_').Value = ''
+        Variable('vssTS_').Value = ''
+        Variable('vssMask_').Value = ''
 
     def open_permission(self):
         self.execute_cmd('mount -o remount rw /')
@@ -365,6 +464,10 @@ class SSHConnector(SSHClient):
         # 移除sil仿真相关程序与配置
         self.execute_cmd(f'rm {env.sil_remote_filepath}')
         self.execute_cmd(f'rm {env.sil_sdf_remote_filepath}')
+        # 还原service_manager.sdf
+        if env.platform_name == 'XDP' and 'No such file' not in self.execute_cmd(f'ls {self.service_manager_sdf_path}.cp'):
+            self.execute_cmd(f'mv {self.service_manager_sdf_path}.cp {self.service_manager_sdf_path}')
+
         if recover_sdc:
             self.execute_cmd('mv /apps/x01/bin/sdc1 /apps/x01/bin/sdc')
         self.execute_cmd('sync')
@@ -376,9 +479,17 @@ class SSHConnector(SSHClient):
             self.check_process('sdc', timeout=30)
 
     def get_xcu_info(self):
-        env.xcu_info = {'vin': self.get_vin(), 'config_word': self.get_cfg_wd(), 'baseline_version': '',
-                        'acore_version': '', 'apps_version': '', 'bsp_version': '', 'ecu_sub_system': ''}
-        if hasattr(env, 'platform_version') and env.platform_version == 2.5:
+        env.xcu_info = {
+            'vin': self.get_vin(),
+            'config_word': self.get_cfg_wd(),
+            'baseline_version': '',
+            'acore_version': '',
+            'apps_version': '',
+            'bsp_version': '',
+            'ecu_sub_system': ''
+        }
+        env.vin = self.vin = env.xcu_info['vin']
+        if env.platform_version == 3.0:
             res = self.execute_interact_cmd('liware.tool.dumpsys', console=False)
             res_list = res.split('\r\n')
             for i in range(len(res_list)):
@@ -423,13 +534,89 @@ class SSHConnector(SSHClient):
         else:
             return cwd_now
 
+    def add_sdf_to_service_manager_file(self):
+        # 备份
+        self.execute_cmd(
+            f'cp {self.service_manager_sdf_path} {self.service_manager_sdf_path}.cp'
+        )
+        self.process_remote_yaml(
+            self.service_manager_sdf_path,
+        )
+
+    def process_remote_yaml(
+            self,
+            remote_yaml_path: str,
+            temp_dir: str = None
+    ) -> None:
+        """
+        完整的SFTP YAML处理流程
+
+        :param remote_yaml_path: 远端YAML路径 (e.g. "/config/app.yaml")
+        :param temp_dir: 临时目录路径（可选）
+        """
+        sil_sdf_data = {
+            "Name": "sil",
+            "Path": "/apps/x01/sdf/sil.sdf",
+            "Priority": "high",
+            "Type": "apps",
+            "StartDelay": 1500,
+            "ResourceLimit": [
+                {
+                    "Mode": ["normal", "factory", "logistic", "exhibition", "ota1", "ota2", "repair"],
+                    "CpuLimit": 10,
+                    "MemLimit": "160M"
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory(dir=temp_dir, prefix="sftp_yaml_") as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            try:
+                # 下载原始文件
+                local_yaml = tmp_path / "service_manager.yaml"
+                logger.info(f"Downloading {remote_yaml_path} to {local_yaml}")
+                self.sftp_get(remote_yaml_path, str(local_yaml))
+
+                # 读取并合并数据
+                existing_data = {}
+                if local_yaml.exists() and local_yaml.stat().st_size > 0:
+                    with open(local_yaml, 'r') as f:
+                        existing_data = yaml.safe_load(f) or []
+
+                names = [i['Name'] for i in existing_data['ServiceManifest']]
+                # 追加新数据
+                if 'sil' not in names:
+                    existing_data['ServiceManifest'].append(sil_sdf_data)
+
+                # 写入更新文件
+                updated_yaml = tmp_path / "updated.yaml"
+                with open(updated_yaml, 'w') as f:
+                    yaml.dump(
+                        existing_data,
+                        f,
+                        default_flow_style=False,
+                        sort_keys=False,
+                        indent=2
+                    )
+
+                # 上传更新文件
+                logger.info(f"Uploading {updated_yaml} to {remote_yaml_path}")
+                self.put_file(str(updated_yaml), remote_yaml_path)
+
+            except Exception as e:
+                logger.error(f"Processing failed: {str(e)}")
+                raise e
+            finally:
+                # 确保清理临时文件
+                if 'local_yaml' in locals() and local_yaml.exists():
+                    local_yaml.unlink()
+                if 'updated_yaml' in locals() and updated_yaml.exists():
+                    updated_yaml.unlink()
+
     def modify_config_word_file(self, data):
         try:
-            cwd_now = self.get_cfg_wd()
-            if data and cwd_now == data:
-                logger.info('当前配置字与待修改配置字相同,无需操作')
-                return True
-            self.execute_cmd(f"""sed -i 's/"{cwd_now}"/"{data}"/g' {self.cfg_wd_filepath}""")
+            cfgwd_json = '{"crc":"00000000","vehicleConfigWord":"%s"}' % data
+            self.execute_cmd(f"""echo '{cfgwd_json}' > {self.cfg_wd_filepath}""")
             self.execute_cmd('sync')
             logger.info('配置字已修改, 正在重启')
             self.execute_cmd('reboot')
@@ -443,6 +630,7 @@ class SSHConnector(SSHClient):
             else:
                 logger.warning('A核配置字修改失败,请排查原因')
                 return False
+
         except Exception as e:
             logger.error(e)
 
@@ -471,7 +659,7 @@ class SSHConnector(SSHClient):
         self.open_permission()
         output = self.execute_cmd(f'pidof sdc')
         if output:
-            logger.info(f'>>> 当前sdc服务已启动 进程id: {output}, 开始禁用sdc服务')
+            logger.info(f'>>> 当前sdc服务已启动 进程id: {output.strip()}, 开始禁用sdc服务')
             self.execute_cmd('mv /apps/x01/bin/sdc /apps/x01/bin/sdc1')
             self.execute_cmd('sync')
             self.execute_cmd('killall -9 sdc')
@@ -491,35 +679,54 @@ class SSHConnector(SSHClient):
             time.sleep(20)
             self.check_process('sdc', timeout=20)
 
-    def put_sil_server(self):
+    def put_file(self, src_filepath, target_filepath):
         self.open_permission()
-        need_reboot = False
-        pid = self.execute_cmd(f'pidof sil')
-        output = self.execute_cmd(f'ls {env.sil_remote_filepath}')
-        if 'No such file' in output or not pid:
-            need_reboot = True
-            logger.info('>>> 当前目标无sil服务, 开始部署sil仿真程序到被测设备')
-            logger.info(f'本地: {env.sil_local_filepath} --> 远端: {env.sil_remote_filepath}')
-            self.sftp_put(
-                local_file=env.sil_local_filepath,
-                remote_file=env.sil_remote_filepath
-            )
-            self.execute_cmd(f'chmod 777 {env.sil_remote_filepath}')
-        else:
-            logger.info(f'>>> sil服务已启动 {pid}')
+        self.sftp_put(src_filepath, target_filepath)
+        self.execute_cmd(f'chmod 777 {target_filepath}')
+        self.execute_cmd('sync')
 
-        output = self.execute_cmd(f'ls {env.sil_sdf_remote_filepath}')
-        if 'No such file' in output:
-            need_reboot = True
-            logger.info('>>> 当前目标无sil sdf文件, 开始上传文件到被测设备')
-            logger.info(f'本地: {env.sil_sdf_local_filepath} --> 远端: {env.sil_sdf_remote_filepath}')
-            self.sftp_put(
-                local_file=env.sil_sdf_local_filepath,
-                remote_file=env.sil_sdf_remote_filepath
-            )
-            self.execute_cmd(f'chmod 777 {env.sil_sdf_remote_filepath}')
-        else:
-            logger.info('>>> 当前目标存在sil sdf文件')
+    def put_vss_cli(self):
+        logger.info('>>> 开始传输vss-cli到被测设备')
+        self.put_file(env.vss_cli_local_filepath, self.vss_cli_filepath)
+
+    def put_eid_fid_cli_file(self):
+        if not self.execute_cmd(f'pidof eid_fid_cli'):
+            logger.info('>>> 开始传输eid_fid_cli到被测设备')
+            self.put_file(env.eid_fid_cli_local_filepath, self.eid_fid_cli_remote_filepath)
+            local_so_filepath = os.path.join(work_dir, 'data', 'key', 'librule_proto.so')
+            remote_so_filepath = '/apps/x01/lib/librule_proto.so'
+            self.put_file(local_so_filepath, remote_so_filepath)
+
+    def put_sil_server(self):
+        need_reboot = False
+        if env.deploy_sil:
+            self.open_permission()
+            pid = self.execute_cmd(f'pidof sil')
+            output = self.execute_cmd(f'ls {env.sil_remote_filepath}')
+            if 'No such file' in output or not pid:
+                need_reboot = True
+                logger.info('>>> 当前目标无sil服务, 开始部署sil仿真程序到被测设备')
+                logger.info(f'本地: {env.sil_local_filepath} --> 远端: {env.sil_remote_filepath}')
+                self.sftp_put(
+                    local_file=env.sil_local_filepath,
+                    remote_file=env.sil_remote_filepath
+                )
+                self.execute_cmd(f'chmod 777 {env.sil_remote_filepath}')
+            else:
+                logger.info(f'>>> sil服务已启动 {pid}')
+
+            output = self.execute_cmd(f'ls {env.sil_sdf_remote_filepath}')
+            if 'No such file' in output:
+                need_reboot = True
+                logger.info('>>> 当前目标无sil sdf文件, 开始上传文件到被测设备')
+                logger.info(f'本地: {env.sil_sdf_local_filepath} --> 远端: {env.sil_sdf_remote_filepath}')
+                self.sftp_put(
+                    local_file=env.sil_sdf_local_filepath,
+                    remote_file=env.sil_sdf_remote_filepath
+                )
+                self.execute_cmd(f'chmod 777 {env.sil_sdf_remote_filepath}')
+            else:
+                logger.info('>>> 当前目标存在sil sdf文件')
 
         if env.disable_sdc:
             self.disable_sdc_service()
@@ -538,31 +745,41 @@ class SSHConnector(SSHClient):
         else:
             logger.info(f'>>> 目标环境ready 无需重启')
 
-    def get_vsc_db_signals(self):
+    def get_db_signals(self, db_name='vcs', table_type='i'):
         """
         测试前需要运行
         """
-        signals = {}
-        cmd = f'sqlite3 -csv {env.vcs_db_path}{env.vcs_db_name} "select * from {env.vcs_signal_table_name}"'
-        res = self.execute_cmd(cmd)
-        for row in res.split('\n'):
-            if row:
-                row_array = row.split(',')
-                signal_name = 'sql3_' + row_array[0]
-                signal_value = int(row_array[1])
-                Variable(signal_name).Value = signal_value
-                signals[signal_name] = signal_value
-                action_signal_name = 'sql3_write_' + row_array[0]
-                action_signal_value = 0
-                Variable(action_signal_name).Value = action_signal_value
-        return signals
+        if 'No such file' not in self.execute_cmd(f'ls {self.db_path[db_name]}'):
+            signals = {}
+            cmd = f'sqlite3 -separator ";;" {self.db_path[db_name]} "select * from {self.table_name[table_type]}"'
+            res = self.execute_cmd(cmd)
+            if res and 'no such table' not in res:
+                for row in res.split('\n'):
+                    if row:
+                        row_array = row.split(';;')
+                        signal_name = f'sql3_{db_name}_{table_type}_' + row_array[0]
+                        if table_type == 'i':
+                            signal_value = int(row_array[1])
+                        elif table_type == 'd':
+                            signal_value = float(row_array[1])
+                        else:
+                            signal_value = row_array[1]
+                        Variable(signal_name).Value = signal_value
+                        signals[signal_name] = signal_value
+                        action_signal_name = f'sql3_write_{db_name}_{table_type}_' + row_array[0]
+                        Variable(action_signal_name).Value = 0
+                return signals
 
-    def set_vsc_db_signal(self, signal_name, signal_value):
-        cmd = f'''sqlite3 {env.vcs_db_path}{env.vcs_db_name} "update {env.vcs_signal_table_name} \
-        set value = {signal_value} where key_name = '{signal_name}'"'''
+    def set_db_signal(self, signal_name, signal_value, db_name='vcs', table_type='i'):
+        if table_type == 's':
+            value_format = "'%s'" % signal_value
+        else:
+            value_format = signal_value
+        cmd = f'''sqlite3 {self.db_path[db_name]} "update {self.table_name[table_type]} \
+        set value = {value_format} where key_name = '{signal_name}'"'''
         logger.info(f'设置VCS-DB信号：{signal_name} = {signal_value}')
-        self.execute_cmd(cmd)
-        Variable('sql3_write_' + signal_name).Value = signal_value
+        output = self.execute_cmd(cmd)
+        Variable(f'sql3_write_{db_name}_{table_type}_' + signal_name).Value = signal_value
 
     def setup_vcs_ip_config(self, status: int):
         """
@@ -592,16 +809,220 @@ class SSHConnector(SSHClient):
                 res = self.execute_cmd(f'cat {self.vcs_ip_config_filepath}')
                 logger.info(f'修改后的vcs ip配置为：{res}')
 
+    def get_vss_signal(self, signal_name):
+        cmd = rf'export DEBUG="" && export PATH=$PATH:/apps/x01/bin && {self.vss_cli_filepath} config --proxy_host localhost --proxy_port 52600 --domain xcu --device_id {self.vin} get -p {signal_name}'
+        output = self.execute_interact_cmd(
+            cmd,
+            timeout=10
+        )
+        for i in output.split('\r\n'):
+            if 'get success:' in i:
+                res = json.loads(i.split('get success: ')[-1])
+                if res:
+                    signal_value = res[0].get('dp', {}).get('value')
+                    timestamp = res[0].get('dp', {}).get('ts')
+                    # 这里要做一个值变化的比较，如果这次值与时间戳没有进行更新，则赋一个标志变量记录
+                    last_signal_val = Variable(f'vss_{signal_name}').Value
+                    last_ts = Variable(f'vssTS_{signal_name}').Value
+                    if signal_value == last_signal_val and timestamp == last_ts:
+                        Variable(f'vssMask_{signal_name}').Value = -9999
+                    else:
+                        Variable(f'vssMask_{signal_name}').Value = signal_value
+                    Variable(f'vss_{signal_name}').Value = signal_value
+                    Variable(f'vssTS_{signal_name}').Value = timestamp
+                    logger.info(f'接收VSS消息: {signal_name} = {signal_value} | {type(signal_value)} | timestamp: {timestamp}')
+                    break
+            elif 'get failed:' in i:
+                Variable(f'vss_{signal_name}').Value = i.split('get failed:')[-1]
+                break
+
+    def set_vss_signal(self, signal_name, signal_value):
+        if isinstance(signal_value, str):
+            arg = '-s'
+        elif isinstance(signal_value, int) or isinstance(signal_value, float):
+            arg = '-d'
+        else:
+            raise Exception('vss signal value type error')
+        output = self.execute_interact_cmd(
+            rf'export DEBUG="" && export PATH=$PATH:/apps/x01/bin &&  {self.vss_cli_filepath} config --proxy_host localhost --proxy_port 52600 --domain xcu --device_id {self.vin} set -p {signal_name} -v {signal_value} {arg}',
+            timeout=10
+        )
+        for i in output.split('\r\n'):
+            if 'set result:' in i:
+                res = json.loads(i.split('set result:')[-1])
+                if res:
+                    error_msg = res[0].get('error')
+                    if error_msg:
+                        logger.error(res[0].get('error'))
+                    else:
+                        Variable(f'vssSet_{signal_name}').Value = signal_value
+                        logger.info(f'发送VSS消息: {signal_name} = {signal_value} | {type(signal_value)}')
+
+    @check_connections
+    def fault_inject(self, signal: Variable, timeout=3):
+        def wait_for_response(channel, timeout=5):
+            """
+            等待通道返回完整响应，直到出现提示符或超时。
+            :param channel: SSH Channel 对象
+            :param timeout: 超时时间（秒）
+            :return: 完整输出（字符串）
+            """
+            time.sleep(0.1)
+            output = []
+            end_time = time.time() + timeout
+            while time.time() < end_time:
+                # 使用 select 检测通道是否可读（非阻塞）
+                rlist, _, _ = select.select([channel], [], [], 0.1)
+                if channel in rlist:
+                    data = channel.recv(1024).decode('utf-8')
+                    if data:
+                        output.append(data)
+                        # 检查是否出现提示符
+                        if ':\r\n' in output[-1] or '# ' in output[-1]:
+                            break
+                else:
+                    # 无数据时短暂休眠，减少 CPU 占用
+                    time.sleep(0.1)
+            return ''.join(output)
+
+        if not signal.name.startswith('eid_fid_'):
+            logger.warning(f'信号不属于eid_fid故障注入信号，请仔细检查格式')
+            return False
+
+        channel = self._client.invoke_shell(term='xterm')
+        channel.settimeout(timeout)
+        time.sleep(0.2)
+        try:
+            logger.info(f'发送EID-FID消息： {signal.name} = {signal.Value}')
+            channel.send('export LD_LIBRARY_PATH=:/apps/x01/lib/:/framework/lib/:/usr/lib:/lib/:/lib:/apps/x01/mesh/iot/lib:/apps/x01/res/lua_lib/:/apps/x01/mesh_services/iot/lib/:/apps/ota/lib/\n')
+            # ================== 发送要执行的命令 ==================
+            channel.send("/apps/x01/bin/eid_fid_cli\n")
+            wait_for_response(channel)
+            channel.send("1\n")
+            wait_for_response(channel)
+            # 发送信号
+            channel.send(f"{signal.name[8:]} {signal.Value}\n")
+            wait_for_response(channel)
+            # 发送结束信号 ASCII 码 3 (Ctrl+C)
+            channel.send(chr(3))
+            wait_for_response(channel)
+        except:
+            logger.error(f'发送EID-FID消息失败')
+            logger.error(traceback.format_exc())
+        channel.close()
+
+
+class SSHAsyncConnector(threading.Thread, SSHClient):
+    def __init__(self, *args, **kwargs):
+        # super().__init__(*args, **kwargs)  # 不能这样调用
+        # 显式初始化所有父类（安全做法）
+        threading.Thread.__init__(self)
+        SSHClient.__init__(self, *args, **kwargs)
+        Variable('ssh_interactive_cmd').Value = ''
+        Variable('ssh_interactive_output').Value = ''
+        self.close_event = threading.Event()
+        self.interact_event = threading.Event()
+        self.interact_lock = threading.Lock()
+        self.interacting = False
+
+    @check_connections
+    def execute_interact_cmd(self, cmd, timeout=10, tail='# ', exit_condition=None, buffer_size=1024):
+        """这个方法每次使用都是一个独立的channel，不适合连续作业"""
+        if self.interacting:
+            logger.warning('当前ssh_interactive_cmd 正在作业，请先发送 当前ssh_interactive_cmd=0 停止作业')
+            return
+
+        with self.interact_lock:
+            self.interacting = True
+            self.interact_event.clear()
+            interaction_thread = threading.Thread(target=self.interaction_loop,
+                                                  args=(cmd, timeout, tail, exit_condition, buffer_size))
+            interaction_thread.daemon = True
+            interaction_thread.start()
+
+    def interaction_loop(self, cmd, timeout, tail, exit_condition, buffer_size):
+        output_buffer = ''
+        pwd_info = 'password: '
+        ask = '(yes/no)? '
+        num_tail_cursor = 0
+
+        self.create_channel(timeout)
+
+        while not self.interact_event.is_set():
+            try:
+                output = self._ansi_escape.sub('', self._channel.recv(buffer_size).decode('utf-8'))
+            except OSError as e:
+                logger.error(f'Connection OS Error info: {e}')
+                self._channel.close()
+                break
+            except UnicodeDecodeError as e:
+                logger.error(f'UnicodeDecode Error info : {e}')
+            else:
+                logger.info(output)
+                output_buffer += output
+                if output_buffer.endswith(pwd_info):
+                    self._channel.send(self.password + '\n')
+                elif output_buffer.endswith(tail) and num_tail_cursor == 0:
+                    self._channel.send(cmd + '\n')
+                    num_tail_cursor += 1
+                elif output_buffer.endswith(tail) and num_tail_cursor != 0:
+                    self._channel.close()
+                    break
+                elif output_buffer.endswith(ask):
+                    self._channel.send('yes' + '\n')
+                elif exit_condition and exit_condition in output:
+                    self._channel.send('\x03')  # Ctrl-C
+                    self._channel.close()
+                    break
+
+                time.sleep(0.1)
+
+        self.interacting = False
+        logger.info('SSHAsyncConnector interact_event 退出')
+        Variable('ssh_interactive_output').Value = output_buffer
+
+    def run(self):
+        self.close_event.clear()
+        while not self.close_event.is_set():
+            time.sleep(1)
+        logger.info('SSHAsyncConnector 异步线程关闭 资源释放')
+        self.close()
+
 
 if __name__ == '__main__':
-    ssh_connector = SSHConnector(hostname='172.31.30.32', username='root', password='')
+    ssh_client = SSHClient(hostname='10.248.50.253', port=8888, username='root', password='')
+    print(ssh_client.execute_cmd('ls /'))
+
+    # ssh_connector = SSHConnector(hostname='172.31.30.32', port=22, username='root', password='root')
+    # signal = Variable('eid_fid_EID_COMM_LOST_NOD_BMS')
+    # signal.Value = 0
+    # ssh_connector.fault_inject(signal)
+    # signal.Value = 1
+    # ssh_connector.fault_inject(signal)
+
+    # ssh_connector.get_db_signals(db_name='rule', table_type='i')
+    # ssh_connector.modify_config_word_file('0150110634FBFF6BFC1C3FFF01E3E20FFF')
+
+    # ssh_connector.get_vss_signal('Vehicle.Charging.TrgtSOCReq')
+    # ssh_connector.get_vss_signal('Vehicle.Charging.TrgtSOCReq')
+    # ssh_connector.get_vss_signal('Vehicle.Charging.TrgtSOCReq')
 
     # ssh_connector.put_sil_server()
     # print(ssh_connector.get_vin())
 
-    # signals = ssh_connector.get_vsc_db_signals()
+    # signals = ssh_connector.get_db_signals()
     # print(signals)
 
-    # ssh_connector.set_vsc_db_signal(signal_name='ActuEgyMd_out_Inner', signal_value=2)
-    # signals = ssh_connector.get_vsc_db_signals()
+    # ssh_connector.set_db_signal(signal_name='ActuEgyMd_out_Inner', signal_value=2)
+    # signals = ssh_connector.get_db_signals()
     # print(signals)
+    
+    # ssh_connector = SSHAsyncConnector(hostname='172.31.30.32', username='root', password='root')
+    # ssh_connector.start()
+    #
+    # ssh_connector.execute_interact_cmd('lilogcat | grep vcs')
+    # time.sleep(5)
+    # ssh_connector.interact_event.set()
+    # with open(r"D:\likun3\Downloads\service_manager(2).yaml", 'r') as f:
+    #     existing_data = yaml.safe_load(f) or []
+    #     print(existing_data)

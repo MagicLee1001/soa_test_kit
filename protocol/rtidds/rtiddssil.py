@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
-# @Email   : likun19941001@163.com
 # @Time    : 2024/2/6 15:09
 # @File    : rtiddssil.py
 
@@ -31,11 +30,13 @@ class RtiDDSReader(threading.Thread):
         self._is_running = threading.Event()
 
     def create_datareader(self):
+        # /rt/fsd_hui/city_hu_traffic 特殊的topic名reader只取最后的
+        topic_name = self.topic_name.split('/')[-1]
         with _input_lock:
             try:
-                return self.connector.get_input(f'SoaSubscriber::Soa{self.topic_name}Reader')
+                return self.connector.get_input(f'SoaSubscriber::Soa{topic_name}Reader')
             except rti.Error:
-                raise Exception(f'Failed to create datareader: {self.topic_name}')
+                raise Exception(f'Failed to create datareader: {topic_name}')
 
     def is_log_message(self, key, last_value, value):
         def is_nan(f):
@@ -66,14 +67,19 @@ class RtiDDSReader(threading.Thread):
                     for sample in self.datareader.samples.valid_data_iter:
                         pass
                         data = sample.get_dictionary()
-                        for key in data.keys():
+                        # print(data)
+                        # for key in data.keys():
+                        #     try:
+                        #         value = sample.get_string(key)
+                        #         if value == '"NaN"':
+                        #             value = math.nan
+                        #     except:
+                        #         value = sample.get_number(key)
+                        for key, value in data.items():
                             try:
-                                value = sample.get_string(key)
-                                if value == '"NaN"':
+                                if value == 'NaN':
                                     value = math.nan
-                            except:
-                                value = sample.get_number(key)
-                            try:
+
                                 # 特殊信号的值存到自定义信号中便于测试区分
                                 if key == 'msg_all_ecumode_feedback_':  # 处理车辆模式信号
                                     ecu_mode_data = json.loads(value)
@@ -84,9 +90,6 @@ class RtiDDSReader(threading.Thread):
                                     Variable('msg_all_ecumode_feedback_ecumode_RBCM').Value = ecu_mode_data[4]['Workmode']
                                     if len(ecu_mode_data) == 6:
                                         Variable('msg_all_ecumode_feedback_ecumode_Sus').Value = ecu_mode_data[5]['Workmode']
-
-                                elif key in ['msg_resssys_temp_', 'msg_cell_volt_']:  # 处理列表类型信号
-                                    value = json.loads(value)  # [0, 0, 255, ...., 255]
 
                                 # 不同topic同一信号名时进行处理
                                 if key in self.duplicate_signal_names:
@@ -119,25 +122,39 @@ class RtiDDSWriter(threading.Thread):
         self._is_running = threading.Event()
 
     def create_datawriter(self):
+        # /rt/fsd_hui/city_hu_traffic 特殊的topic名reader只取最后的
+        topic_name = self.topic_name.split('/')[-1]
         with _output_lock:
             try:
-                if self.topic_name.find('Soa') >= 0:
-                    datawriter = "SoaPublisher::%s" % self.topic_name
+                if topic_name.find('Soa') >= 0:
+                    datawriter = f"SoaPublisher::{topic_name}"
                 else:
-                    datawriter = "SoaPublisher::Soa%sWriter" % self.topic_name
+                    datawriter = f"SoaPublisher::Soa{topic_name}Writer"
                 return self.connector.get_output(datawriter)
             except rti.Error:
                 raise Exception(f'Failed to create datawriter: {self.topic_name}')
 
-    def set_value(self, signal_name, signal_value):
+    def set_value(self, signal_name, signal_value, member_type=None):
         with _output_lock:
             try:
-                if isinstance(signal_value, str):
+                if member_type == 'string':
+                    if not isinstance(signal_value, str):
+                        signal_value = json.dumps(signal_value, ensure_ascii=False)
                     self.datawriter.instance.set_string(signal_name, signal_value)
-                elif isinstance(signal_value, dict):
+                elif member_type == 'boolean':
+                    self.datawriter.instance.set_boolean(signal_name, signal_value)
+                elif member_type == 'nonBasic':
                     self.datawriter.instance.set_dictionary(signal_value)
                 else:
                     self.datawriter.instance.set_number(signal_name, signal_value)
+
+                # if isinstance(signal_value, str):
+                #     self.datawriter.instance.set_string(signal_name, signal_value)
+                # elif isinstance(signal_value, dict):
+                #     print(signal_value)
+                #     self.datawriter.instance.set_dictionary(signal_value)
+                # else:
+                #     self.datawriter.instance.set_number(signal_name, signal_value)
                 # wait是保证有接收端接收再往下走,不wait就直接发出去就不管了
                 # self.datawriter.wait()
             except Exception as e:
@@ -165,14 +182,15 @@ class RtiDDSWriterDoS(RtiDDSWriter):
         signal_names = [i.split(':')[-1] for i in self.dds_xml_obj.topic2signal[self.topic_name]]
         while not self.stop_event.is_set():
             for signal_name in signal_names:
-                signal_value = float(random.randint(0, 2**8-1))
+                signal_value = float(random.randint(0, 2 ** 8 - 1))
+                signal_type = self.dds_xml_obj.signal2type.get(signal_name)
                 try:
-                    self.set_value(signal_name, signal_value)
+                    self.set_value(signal_name, signal_value, member_type=signal_type)
                     self.write()
                 except Exception as e:
-                    print(e, f'{self.topic_name} | {signal_name} = {signal_value}')
+                    print(e, f'{self.topic_name} | {signal_name} = {signal_value} | {signal_type}')
                 else:
-                    print(f'pub msg: {self.topic_name} | {signal_name} = {signal_value}')
+                    print(f'pub msg: {self.topic_name} | {signal_name} = {signal_value} | {signal_type}')
             time.sleep(self.interval)
 
     def stop(self):
@@ -181,23 +199,30 @@ class RtiDDSWriterDoS(RtiDDSWriter):
 
 if __name__ == '__main__':
     pass
-    filepath = r"D:\likun3\Downloads\simulator_configs_new(1).xml"
-    sub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaSubParticipant", url=filepath)
-    dr = RtiDDSReader(sub_connector, topic_name='DDSMapEvent')
-    dr.start()
-    dr = RtiDDSReader(sub_connector, topic_name='RESSTempData32960')
-    dr.start()
-    dr = RtiDDSReader(sub_connector, topic_name='DDSRouteLinkInfo')
-    dr.start()
+    filepath = r"D:\likun3\Downloads\rti_simulator_configs_new_新版.xml"
+    # sub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaSubParticipant", url=filepath)
+    # dr = RtiDDSReader(sub_connector, topic_name='DDSMapEvent')
+    # dr.start()
+    # dr = RtiDDSReader(sub_connector, topic_name='RESSTempData32960')
+    # dr.start()
+    # dr = RtiDDSReader(sub_connector, topic_name='DDSRouteLinkInfo')
+    # dr.start()
+    # dr = RtiDDSReader(sub_connector, topic_name='ChargingControl')
+    # dr.start()
+    #
+    # time.sleep(5)
+    # pub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaPubParticipant", url=filepath)
+    # dw = RtiDDSWriter(pub_connector, topic_name='ChargingControl')
+    # dw.set_value('srv_res_chrg_here_poi_', 1, member_type='string')
+    # dw.write()
 
-    pub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaPubParticipant", url=filepath)
-    dw = RtiDDSWriter(pub_connector, topic_name='DDSMapEvent')
-    dw.set_value('type', 1)
-    dw.write()
-    pub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaPubParticipant", url=filepath)
-    dw = RtiDDSWriter(pub_connector, topic_name='RESSTempData32960')
-    dw.set_value('msg_resssys_temp_', {'msg_resssys_temp_': [1]*100})
-    dw.write()
+    # dw = RtiDDSWriter(pub_connector, topic_name='DDSMapEvent')
+    # dw.set_value('type', 1)
+    # dw.write()
+    # pub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaPubParticipant", url=filepath)
+    # dw = RtiDDSWriter(pub_connector, topic_name='RESSTempData32960')
+    # dw.set_value('msg_resssys_temp_', {'msg_resssys_temp_': [1]*100})
+    # dw.write()
     pub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaPubParticipant", url=filepath)
     dw = RtiDDSWriter(pub_connector, topic_name='DDSRouteLinkInfo')
     dyna_value = {
@@ -209,6 +234,5 @@ if __name__ == '__main__':
             # ... 更多 LinkInfo
         ]
     }
-    dw.set_value('linkInfos', dyna_value)
+    dw.set_value('linkInfos', dyna_value, member_type='nonBasic')
     dw.write()
-

@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
-# @Email   : likun19941001@163.com
 # @Time    : 2024/3/29 15:37
 # @File    : start_up.py
 
@@ -11,7 +10,7 @@ from PyQt5.QtGui import QFont, QIcon, QTextOption
 from PyQt5.Qt import QLineEdit
 from PyQt5.QtWidgets import (
     QVBoxLayout, QPushButton, QSpacerItem, QHBoxLayout, QLabel, QTextEdit, QFormLayout, QFrame, QFileDialog, QDialog,
-    QSizePolicy, QRadioButton, QButtonGroup
+    QSizePolicy, QRadioButton, QButtonGroup, QCheckBox
 )
 from settings import env, work_dir
 from connector.dds import DDSConnector, DDSConnectorRti
@@ -39,7 +38,11 @@ class PlatformConfigurationDialog(QDialog):
                 res = json.load(f)
                 env.load(res['settings_filepath'])
                 env.disable_sdc = res['disable_sdc']
+                env.deploy_sil = res['deploy_sil']
                 env.has_topic_prefix = res['has_topic_prefix']
+                env.sub_all_topics = res['sub_all_topics']
+                env.pub_all_topics = res['pub_all_topics']
+                env.platform_name = res['platform_name']
         except:
             pass
 
@@ -51,8 +54,12 @@ class PlatformConfigurationDialog(QDialog):
             json.dump(
                 {
                     'disable_sdc': self.disable_sdc_yes.isChecked(),
+                    'deploy_sil': self.deploy_sil_yes.isChecked(),
                     'settings_filepath': env.settings_filepath,
+                    'platform_name': env.platform_name,
                     'has_topic_prefix': self.has_topic_prefix_yes.isChecked(),
+                    'sub_all_topics': self.sub_all_topics.isChecked(),
+                    'pub_all_topics': self.pub_all_topics.isChecked()
                 },
                 f,
                 ensure_ascii=False,
@@ -62,13 +69,17 @@ class PlatformConfigurationDialog(QDialog):
     def refresh_ui(self):
         """ 从 env 对象更新界面元素"""
         if 'vbs_' in env.idl_filepath.lower():
-            self.radio_platform_25.setChecked(True)
-        else:
-            self.radio_platform_20.setChecked(True)
+            self.radio_platform_30.setChecked(True)
+        # else:
+        #     self.radio_platform_xap.setChecked(True)
         if self.disable_sdc_yes.isChecked():
             env.disable_sdc = True
         else:
             env.disable_sdc = False
+        if self.deploy_sil_yes.isChecked():
+            env.deploy_sil = True
+        else:
+            env.deploy_sil = False
         if self.has_topic_prefix_yes.isChecked():
             env.has_topic_prefix = True
         else:
@@ -96,7 +107,7 @@ class PlatformConfigurationDialog(QDialog):
             self.windowFlags() & ~Qt.WindowContextHelpButtonHint | Qt.WindowStaysOnTopHint | Qt.WindowMinimizeButtonHint
             | Qt.WindowMaximizeButtonHint
         )
-        self.setWindowTitle('SOA A核测试工具 - 环境配置选择')
+        self.setWindowTitle('SOA A核测试工具 - 启动项')
         self.setWindowIcon(QIcon('ui/icons/icon.ico'))
         layout = QVBoxLayout(self)
         # 选择配置
@@ -124,23 +135,52 @@ class PlatformConfigurationDialog(QDialog):
         hbox0.addWidget(self.disable_sdc_yes)
         hbox0.addWidget(self.disable_sdc_no)
         layout.addLayout(hbox0)
+        # 是否部署sil
+        layout.addWidget(QLabel('部署sil'))
+        hbox00 = QHBoxLayout()
+        self.deploy_sil_button_group = QButtonGroup(self)
+        self.deploy_sil_yes = QRadioButton('是')
+        self.deploy_sil_no = QRadioButton('否')
+        self.deploy_sil_button_group.addButton(self.deploy_sil_yes)
+        self.deploy_sil_button_group.addButton(self.deploy_sil_no)
+        if env.deploy_sil:
+            self.deploy_sil_yes.setChecked(True)
+        else:
+            self.deploy_sil_no.setChecked(True)
+        hbox00.addWidget(self.deploy_sil_yes)
+        hbox00.addWidget(self.deploy_sil_no)
+        layout.addLayout(hbox00)
         # 平台选择的单选按钮
         layout.addWidget(QLabel('平台'))
         hbox1 = QHBoxLayout()
         self.platform_button_group = QButtonGroup(self)
-        self.radio_platform_20 = QRadioButton('EEA2.0')
-        self.radio_platform_25 = QRadioButton('EEA2.5')
-        # self.radio_platform_20.setEnabled(False)
-        # self.radio_platform_25.setEnabled(False)
-        self.platform_button_group.addButton(self.radio_platform_20)
-        self.platform_button_group.addButton(self.radio_platform_25)
+        self.radio_platform_xpp = QRadioButton('XPP')
+        self.radio_platform_xap = QRadioButton('XAP')
+        self.radio_platform_xdp = QRadioButton('XDP')
+        self.radio_platform_30 = QRadioButton('EEA3.0')
+        # self.radio_platform_xap.setEnabled(False)
+        # self.radio_platform_30.setEnabled(False)
+        self.platform_button_group.addButton(self.radio_platform_xpp)
+        self.platform_button_group.addButton(self.radio_platform_xap)
+        self.platform_button_group.addButton(self.radio_platform_xdp)
+        self.platform_button_group.addButton(self.radio_platform_30)
+        # 历史配置中默认选用
+        if env.platform_name == 'XPP':
+            self.radio_platform_xpp.setChecked(True)
+        elif env.platform_name == 'XAP':
+            self.radio_platform_xap.setChecked(True)
+        elif env.platform_name == 'XDP':
+            self.radio_platform_xdp.setChecked(True)
+        else:
+            self.radio_platform_30.setChecked(True)
         # 平台默认选项
         if 'vbs_' in env.idl_filepath:
-            self.radio_platform_25.setChecked(True)
-        else:
-            self.radio_platform_20.setChecked(True)
-        hbox1.addWidget(self.radio_platform_20)
-        hbox1.addWidget(self.radio_platform_25)
+            self.radio_platform_30.setChecked(True)
+
+        hbox1.addWidget(self.radio_platform_xap)
+        hbox1.addWidget(self.radio_platform_xpp)
+        hbox1.addWidget(self.radio_platform_xdp)
+        hbox1.addWidget(self.radio_platform_30)
         layout.addLayout(hbox1)
         # 是否带topic前缀
         layout.addWidget(QLabel('带Topic_前缀'))
@@ -148,8 +188,6 @@ class PlatformConfigurationDialog(QDialog):
         self.select_box2 = QButtonGroup(self)
         self.has_topic_prefix_yes = QRadioButton('是')
         self.has_topic_prefix_no = QRadioButton('否')
-        # self.radio_platform_20.setEnabled(False)
-        # self.radio_platform_25.setEnabled(False)
         self.select_box2.addButton(self.has_topic_prefix_yes)
         self.select_box2.addButton(self.has_topic_prefix_no)
         # 平台默认选项
@@ -160,7 +198,7 @@ class PlatformConfigurationDialog(QDialog):
         hbox2.addWidget(self.has_topic_prefix_yes)
         hbox2.addWidget(self.has_topic_prefix_no)
         layout.addLayout(hbox2)
-        # -------------- 分割线 -------------- #
+        # 分割线
         hline = QFrame()
         hline.setFrameShape(QFrame.HLine)
         hline.setFrameShadow(QFrame.Sunken)
@@ -176,6 +214,21 @@ class PlatformConfigurationDialog(QDialog):
         self.case_dir_edit = QLineEdit(env.case_dir)
         self.sil_local_filepath_edit = QLineEdit(env.sil_local_filepath)
         self.sil_sdf_local_filepath_edit = QLineEdit(env.sil_sdf_local_filepath)
+        a2l_filepath = env.additional_configs.get('xcp', {}).get('a2l')
+        if a2l_filepath:
+            a2l_filepath = os.path.realpath(a2l_filepath)
+            if not os.path.exists(a2l_filepath):
+                a2l_filepath = '警告!!! 标定a2l文件路径不存在，请检查并添加路径到 data\\conf\\additional.json'
+        else:
+            a2l_filepath = '未指定标定a2l文件，请检查并添加路径到 data\\conf\\additional.json'
+        self.a2l_filepath_edit = QLineEdit(a2l_filepath)
+        self.a2l_filepath_edit.setReadOnly(True)
+        self.sub_all_topics = QCheckBox('订阅Topic <勾选表示全部>')
+        if env.sub_all_topics:
+            self.sub_all_topics.setChecked(True)
+        self.pub_all_topics = QCheckBox('发布Topic <勾选表示全部>')
+        if env.pub_all_topics:
+            self.pub_all_topics.setChecked(True)
         self.sub_topics_edit = QTextEdit(self)
         self.sub_topics_edit.setWordWrapMode(QTextOption.WordWrap)
         self.sub_topics_edit.insertPlainText('\n'.join(env.sub_topics))
@@ -190,12 +243,15 @@ class PlatformConfigurationDialog(QDialog):
         form_layout.addRow('用例路径       ', self.case_dir_edit)
         form_layout.addRow('SiL仿真程序    ', self.sil_local_filepath_edit)
         form_layout.addRow('sdf文件路径    ', self.sil_sdf_local_filepath_edit)
+        form_layout.addRow('a2l路径(只读)    ', self.a2l_filepath_edit)
         topic_layout = QHBoxLayout()
         sub_topic_layout = QVBoxLayout()
-        sub_topic_layout.addWidget(QLabel('订阅topic'))
+        # sub_topic_layout.addWidget(QLabel('订阅topic'))
+        sub_topic_layout.addWidget(self.sub_all_topics)
         sub_topic_layout.addWidget(self.sub_topics_edit)
         pub_topic_layout = QVBoxLayout()
-        pub_topic_layout.addWidget(QLabel('发布topic'))
+        # pub_topic_layout.addWidget(QLabel('发布topic'))
+        pub_topic_layout.addWidget(self.pub_all_topics)
         pub_topic_layout.addWidget(self.pub_topics_edit)
         topic_layout.addLayout(sub_topic_layout)
         topic_layout.addLayout(pub_topic_layout)
@@ -213,7 +269,7 @@ class PlatformConfigurationDialog(QDialog):
         layout.addLayout(buttons_layout)
         # 根据内容自动调整大小
         self.setFont(QFont("Segoe UI", 10))  # 设置字体和字号
-        self.setMinimumSize(600, 600)
+        self.setMinimumSize(600, 800)
 
     def confirm(self):
         # 更新配置
@@ -225,21 +281,36 @@ class PlatformConfigurationDialog(QDialog):
         env.case_dir = self.case_dir_edit.text()
         env.sil_local_filepath = self.sil_local_filepath_edit.text()
         env.sil_sdf_local_filepath = self.sil_sdf_local_filepath_edit.text()
-        env.sub_topics = [i for i in self.sub_topics_edit.toPlainText().split('\n') if i]
-        env.pub_topics = [i for i in self.pub_topics_edit.toPlainText().split('\n') if i]
+        env.sub_all_topics = self.sub_all_topics.isChecked()
+        env.pub_all_topics = self.pub_all_topics.isChecked()
+        if not env.sub_all_topics:
+            env.sub_topics = [i for i in self.sub_topics_edit.toPlainText().split('\n') if i]
+        if not env.pub_all_topics:
+            env.pub_topics = [i for i in self.pub_topics_edit.toPlainText().split('\n') if i]
         # ...更新其他配置
 
         # 根据选择更新平台连接器
-        if self.radio_platform_20.isChecked():
+        if self.radio_platform_xap.isChecked() or self.radio_platform_xpp.isChecked() or self.radio_platform_xdp.isChecked():
             env.DDSConnectorClass = DDSConnectorRti
             env.platform_version = 2.0
-        elif self.radio_platform_25.isChecked():
+            if self.radio_platform_xpp.isChecked():
+                env.platform_name = 'XPP'
+            elif self.radio_platform_xap.isChecked():
+                env.platform_name = 'XAP'
+            elif self.radio_platform_xdp.isChecked():
+                env.platform_name = 'XDP'
+        elif self.radio_platform_30.isChecked():
             env.DDSConnectorClass = DDSConnector
-            env.platform_version = 2.5
+            env.platform_version = 3.0
+            env.platform_name = 'EEA3.0'
         if self.disable_sdc_yes.isChecked():
             env.disable_sdc = True
         else:
             env.disable_sdc = False
+        if self.deploy_sil_yes.isChecked():
+            env.deploy_sil = True
+        else:
+            env.deploy_sil = False
         if self.has_topic_prefix_yes.isChecked():
             env.has_topic_prefix = True
         else:

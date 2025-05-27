@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
-# @Email   : likun19941001@163.com
 # @Time    : 2024/3/29 14:15
 # @File    : worker.py
 
@@ -14,13 +13,18 @@ from runner.log import logger
 from PyQt5 import QtCore
 from PyQt5.QtCore import pyqtSignal, QDateTime
 from PyQt5.Qt import QThread, QObject
-from settings import env
+from settings import env, work_dir
 from runner.variable import Variable
 from connector.sdc import SDCConnector
 from connector.dds import DDSConnector, DDSConnectorRti
+from connector.ssh import SSHConnector, SSHAsyncConnector
+from connector.doipclient import DoIPClient
+from connector.xcp import XCPConnector
+from runner.simulator import DoIPMonitorThread
 from runner.tester import CaseTester, TestPrecondition, TestPostCondition, TestHandle
 from runner.assistant import HandleTestCaseFile
 from test_framework import set_test_handle, qt_main
+from flask_app import app as local_flask_app
 
 
 # 在Qt框架中，几乎所有的GUI组件，都不是线程安全的。
@@ -37,7 +41,21 @@ class GetGlobalVarsWorker(QThread):
     pass
 
 
+class FlaskThread(QThread):
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+
+    def run(self):
+        logger.info("Starting Flask server")
+        local_flask_app.run('0.0.0.0', port=61007, threaded=True)
+        # Ensure that Flask server stops correctly if QThread is stopped
+        logger.info("Flask server stopped")
+
+
 class AutoTestWorker(QThread):
+    suite_result_path = pyqtSignal(list)
+
     """ 自动化测试线程"""
     def __init__(self, app):
         super().__init__()
@@ -49,6 +67,9 @@ class AutoTestWorker(QThread):
             set_test_handle()
             # 设置执行用例
             self.app.set_env_testcase()
+            # 测试回调，用于完成后发送信号
+            env.tester.set_callback(self)
+            self.suite_result_path.emit(TestHandle.result_html_path)
             # 开始自动化测试
             qt_main()
             # 飞书报告通知
@@ -66,8 +87,8 @@ class AutoTestWorker(QThread):
         finally:
             logger.info('测试任务执行全部完成 资源重置')
             env.stop_autotest = False
-            if env.remote_callback:
-                env.remote_callback.task_callback(env.xcu_info)
+            # if env.remote_callback:
+            #     env.remote_callback.task_callback(env.xcu_info)
             # 远程信息重置
             env.remote_event_data = None
             env.remote_callback = None
@@ -83,6 +104,9 @@ class ReloadSettingWorker(QThread):
 
     def run(self) -> None:
         try:
+            # 当前的connector退出
+            TestPostCondition(env.tester).run()
+
             # 处理空配置文件路径
             setting_filepath = self.app.setting_file.text()
             if not setting_filepath:
@@ -92,31 +116,53 @@ class ReloadSettingWorker(QThread):
             case_filenames = TestHandle.get_filename_from_dir(env.case_dir, 'xlsm')
             case_filepaths = [os.path.join(env.case_dir, case_filename) for case_filename in case_filenames]
             self.display_case_path_signal.emit(case_filepaths)
+
             # 重写初始化connector 更新各种信号矩阵
+            env.ssh_connector = SSHConnector(hostname=env.ssh_hostname, username=env.ssh_username, password=env.ssh_password, port=env.ssh_port)
+            env.ssh_async_connector = SSHAsyncConnector(hostname=env.ssh_hostname, username=env.ssh_username, password=env.ssh_password, port=env.ssh_port)
             env.sdc_connector = SDCConnector(env.dbo_filepath, server_ip=env.sil_server_ip, server_port=env.sil_server_port)
             if 'rti_' in env.idl_filepath.lower():
                 env.DDSConnectorClass = DDSConnectorRti
                 env.platform_version = 2.0
             else:
                 env.DDSConnectorClass = DDSConnector
-                env.platform_version = 2.5
+                env.platform_version = 3.0
             env.dds_connector = env.DDSConnectorClass(idl_filepath=env.idl_filepath)
+            doipclient_config = env.additional_configs.get('doipclient')
+            if doipclient_config:
+                env.doipclient = DoIPClient(
+                    server_ip=doipclient_config['server_ip'],
+                    server_port=doipclient_config['server_port'],
+                    client_logical_addr=doipclient_config['client_logical_addr'],
+                    server_logical_addr=doipclient_config['server_logical_addr'],
+                    uds_timeout=doipclient_config['uds_timeout'],
+                    security_level=doipclient_config['security_level'],
+                    security_mask=doipclient_config['security_mask']
+                )
+            else:
+                env.doipclient = DoIPClient()
+            env.doip_simulator = DoIPMonitorThread()
+            a2l_filepath = os.path.normpath(env.additional_configs.get('xcp', {}).get('a2l'))
+            if os.path.exists(a2l_filepath):
+                env.xcp_connector = XCPConnector(a2l_filepath)
+            else:
+                logger.warning('没有指定标定a2l文件，请放置到 data\\matrix\\ 目录下并添加配置到 data\\conf\\additional.json')
+                env.xcp_connector = None
+
             env.tester = CaseTester(
                 sub_topics=env.sub_topics,
                 pub_topics=env.pub_topics,
                 sdc_connector=env.sdc_connector,
                 dds_connector=env.dds_connector,
                 ssh_connector=env.ssh_connector,
+                ssh_async_connector=env.ssh_async_connector,
                 doip_simulator=env.doip_simulator,
+                db_connector=env.db_connector,
+                doipclient=env.doipclient,
+                xcp_connector=env.xcp_connector
             )
-            tpr = TestPrecondition(env.tester)
-            # 更新ssh信号矩阵
-            tpr.start_ssh_connector()
-            # 更新dds writer与reader池
-            tpr.verify_topic_correctness()
-            tpr.start_dds_connector()
-            # 重新连接sil server
-            env.sdc_connector.reconnect_server()
+            TestPrecondition(env.tester).run()
+            logger.info('重新初始化完成!')
             logger.success('环境配置更新完成')
         except:
             logger.error(traceback.format_exc())
@@ -129,9 +175,12 @@ class DeploySilNode(QThread):
 
     def run(self):
         try:
+            env.deploy_sil = True
+            env.disable_sdc = True
             env.tester.ssh_connector.put_sil_server()
             # 如果已经启动了 会抛出 RuntimeError("threads can only be started once")异常
             if not env.tester.sdc_connector.started:
+                env.tester.sdc_connector.connect_server()
                 env.tester.sdc_connector.start()
             logger.success('完成sil仿真节点部署')
         except:
@@ -145,6 +194,8 @@ class UndeploySilNode(QThread):
 
     def run(self):
         try:
+            env.deploy_sil = False
+            env.disable_sdc = False
             env.tester.ssh_connector.recover_sil_environment(recover_vcs=False, recover_sdc=False)
             logger.success('完成sil仿真节点移除')
         except:

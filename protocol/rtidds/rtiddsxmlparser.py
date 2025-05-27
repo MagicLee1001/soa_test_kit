@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
-# @Email   : likun19941001@163.com
 # @Time    : 2024/4/26 14:23
 # @File    : rtiddsxmlparser.py
 
@@ -14,10 +13,11 @@ class ParseXML:
         self.xml_filepath = xml_filepath
         self.tree = ET.parse(self.xml_filepath)
         self.root = self.tree.getroot()
-        self.signal_map = {}
-        self.topic2signal = {}
-        self.dupl_signal_names = []
+        self.signal_map = {}  # signal: topic
+        self.signal2type = {}  # signal: type
+        self.topic2signal = {}  # topic: [signal, ]
         self.topic_ref = {}
+        self.dupl_signal_names = []
         self.signal2topic()
         # self.parse_topic()
 
@@ -48,6 +48,7 @@ class ParseXML:
                 _id = member.get('id')
                 _type = member.get('type')
                 self.topic_ref[topic_name]['members'][signal_name] = {'id': _id, 'type': _type}
+                self.signal2type[signal_name] = _type
                 if signal_name in self.signal_map:  # 信号名相同 topic不同的情况下拼接
                     if signal_name not in self.dupl_signal_names:
                         self.dupl_signal_names.append(signal_name)
@@ -71,5 +72,5 @@ class ParseXML:
 
 
 if __name__ == '__main__':
-    parser = ParseXML(r"D:\likun3\Downloads\simulator_configs_new(1).xml")
+    parser = ParseXML(r"D:\likun3\Downloads\kyl.xml")
     print(parser.signal_map['DDSMapEvent::timestamp'])

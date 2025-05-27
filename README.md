@@ -3,7 +3,7 @@
 <author>李琨</author>
 
 ## 项目描述
-SOA(面向服务架构)测试框架,适配汽车（新能源）车机系统域间通信（包括DDS、SSH、TCP、HTTP等协议类型）的测试
+SOA(面向服务架构)测试框架,适配汽车（新能源）车机系统域间通信（包括DDS、SSH、TCP、DoIP、XCP、HTTP等协议类型）和功能测试
 
 ## 环境依赖
 Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (AMD64)] on win32

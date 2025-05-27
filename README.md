@@ -30,7 +30,7 @@ Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (
     ```
 - DDS idl文件
     ```
-    固定路径: .\data\matrix\XBP.xml
+    固定路径: .\data\matrix\rti_xap.xml
     ```
 - 测试用例路径
     ```

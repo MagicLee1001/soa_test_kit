@@ -14,14 +14,19 @@ from runner.log import logger
 from runner.variable import Variable
 
 # 1.3.0版本
-from protocol.lidds130 import vbs
-from protocol.lidds130.liddssil import evbsWriter, evbsReader
-from protocol.lidds130.liddsxmlparser import Parser
+from protocol.lidds import vbs
+from protocol.lidds.liddssil import evbsWriter, evbsReader
+from protocol.lidds.liddsxmlparser import Parser
 
 from protocol.rtidds import rticonnextdds_connector as rti
 from protocol.rtidds.rtiddssil import RtiDDSReader, RtiDDSWriter
 from protocol.rtidds.rtiddsxmlparser import ParseXML
-from connector import ConnectorPool
+
+
+class ConnectorPool:
+    dds_reader_pool = {}
+    dds_writer_pool = {}
+    topic_obj_pool = {}
 
 
 class DDSConnector:
@@ -45,6 +50,10 @@ class DDSConnector:
         self.signal_map = self.xml_parser.signal_map  # {signal_name:topic_name}
         self.signal2var()
         self.get_topic_names_from_xml()
+        if env.sub_all_topics:
+            env.sub_topics = self.reader_topic_names
+        if env.pub_all_topics:
+            env.pub_topics = self.writer_topic_names
 
     def __new__(cls, *args, **kwargs):
         """单例模式"""
@@ -140,8 +149,9 @@ class DDSConnector:
     def publish(self, writer, signal_name, signal_value):
         if '::' in signal_name:  # 处理topic不同但信号名相同的场景
             signal_name = signal_name.split('::')[-1]
-        logger.info(f'发送DDS消息：{writer.topic_name} | {signal_name} = {signal_value}')
-        writer.set_value(signal_name, signal_value)
+        member_type = self.xml_parser.signal2type.get(signal_name)
+        logger.info(f'发送DDS消息：{writer.topic_name} | {signal_name} = {signal_value} | {member_type}')
+        writer.set_value(signal_name, signal_value, member_type=member_type)
         writer.write()
 
     def dds_send(self, signal):
@@ -158,8 +168,9 @@ class DDSConnector:
             signal_name, signal_value = signal.name, signal.Value
             if '::' in signal_name:  # 处理topic不同但信号名相同的场景
                 signal_name = signal_name.split('::')[-1]
-            logger.info(f'发送DDS消息：{topic_name} | {signal_name} = {signal_value}')
-            dds_writer.set_value(signal_name, signal_value)
+            member_type = self.xml_parser.signal2type.get(signal_name)
+            logger.info(f'发送DDS消息：{topic_name} | {signal_name} = {signal_value} | {member_type}')
+            dds_writer.set_value(signal_name, signal_value, member_type=member_type)
         dds_writer.write()
 
     def release_connector(self):
@@ -201,6 +212,10 @@ class DDSConnectorRti(DDSConnector):
         self.signal2var()
         self.add_additional_signals()
         self.get_topic_names_from_xml()
+        if env.sub_all_topics:
+            env.sub_topics = self.reader_topic_names
+        if env.pub_all_topics:
+            env.pub_topics = self.writer_topic_names
         self.sub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaSubParticipant", url=idl_filepath)
         self.pub_connector = rti.Connector(config_name="SoaParticipantLibrary::SoaPubParticipant", url=idl_filepath)
 
@@ -232,6 +247,7 @@ class DDSConnectorRti(DDSConnector):
     def create_subscriber(self, topic_name):
         if not ConnectorPool.dds_reader_pool.get(topic_name):
             dds_reader = RtiDDSReader(connector=self.sub_connector, topic_name=topic_name, dupl_signal_names=self.dupl_signal_names)
+            dds_reader.daemon = True
             dds_reader.start()
             ConnectorPool.dds_reader_pool[topic_name] = dds_reader
 
@@ -289,3 +305,4 @@ if __name__ == '__main__':
     # time.sleep(1)
     # dds_connector.dds_send(signal)
     # dds_connector.release_connector()
+

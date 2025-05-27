@@ -11,7 +11,7 @@ import struct
 import time
 
 from runner.log import logger
-from ctypes import Structure, c_char, c_float, sizeof, memmove, addressof
+from ctypes import Structure, c_char, c_double, c_uint, c_ubyte, sizeof, memmove, addressof
 from select import select
 from runner.variable import Variable
 from settings import env
@@ -20,49 +20,78 @@ M2A_NAME_TYPE = {}
 
 
 def map_data_type(signal_name):
-    if M2A_NAME_TYPE.get(signal_name) == 'bool':
-        return 3
-    elif M2A_NAME_TYPE.get(signal_name) == 'uint32_t':
-        return 4
-    elif M2A_NAME_TYPE.get(signal_name) == 'uint64_t':
-        return 5
-    elif M2A_NAME_TYPE.get(signal_name) == 'int32_t':
-        return 6
-    elif M2A_NAME_TYPE.get(signal_name) == 'int64_t':
-        return 7
-    elif M2A_NAME_TYPE.get(signal_name) == 'float':
-        return 8
-    elif M2A_NAME_TYPE.get(signal_name) == 'double':
-        return 9
-    elif M2A_NAME_TYPE.get(signal_name) == 'uint8_t':
-        return 4
-    elif M2A_NAME_TYPE.get(signal_name) == 'uint16_t':
-        return 4
-    elif M2A_NAME_TYPE.get(signal_name) == 'uint16_t':
-        return 4
-    elif M2A_NAME_TYPE.get(signal_name) == 'int8_t':
-        return 6
-    elif M2A_NAME_TYPE.get(signal_name) == 'int16_t':
-        return 6
-    else:
-        return 8
+    signal_type = M2A_NAME_TYPE.get(signal_name, {}).get('signal_type', '')
+    match signal_type:
+        case 'bool':
+            return 0x01
+        case 'uint32_t':
+            return 0x02
+        case 'uint64_t':
+            return 0x03
+        case 'int32_t':
+            return 0x04
+        case 'int64_t':
+            return 0x05
+        case 'float':
+            return 0x06
+        case 'double':
+            return 0x07
+        case 'uint8_t':
+            return 0x08
+        case 'uint16_t':
+            return 0x09
+        case 'int8_t':
+            return 0x0A
+        case 'int16_t':
+            return 0x0B
+        case _ if 'uint8_t[' in signal_type:  # 数组
+            return 0x0C
+        case _:  # 默认为double
+            return 0x07
 
 
 class StructA2M(Structure):
     _fields_ = [
-        ("signalName", c_char * 64),
-        ("signalValue", c_float)
+        ("signalName", c_char * 64),  # 信号名字是64字节长度
+        ("signalType", c_ubyte),       # 信号类型 (0x07：浮点数; 0x0C：uint8数组)
+        ("valueLength", c_ubyte),      # 信号值长度
     ]
 
 
 class StructM2A:
-    def __init__(self, name: str, value: float, signal_type: int):
-        self.name = name.encode('utf-8')
+    def __init__(self, name: str, value, signal_type: int):
+        self.name = name  # 64字节
         self.value = value
-        self.signal_type = signal_type
+        self.signal_type = signal_type  # 0x00 - 0xFF 1个字节
+        self.value_length = 0  # 值的字节长度 0-255
 
     def pack(self):
-        return struct.pack('64sfi', self.name, self.value, self.signal_type)
+        # 首先打包name、signal_type和长度
+        # # struct.pack 需要对数据进行二进制级别的操作，需要在打包成二进制数据之前转换为字节表示。
+        # print(self.name, self.value, type(self.value), self.signal_type)
+        packed_data = struct.pack('64s', self.name.encode('utf-8'))
+        packed_data += struct.pack('B', self.signal_type)
+        if isinstance(self.value, float):
+            byte_data = struct.pack('d', self.value)
+        elif isinstance(self.value, list):
+            if not all(isinstance(v, int) for v in self.value):
+                raise ValueError('数组元素值类型或范围错误，非全部为0-255正整型')
+            # value = [ord(c) for c in self.value]
+            byte_data = struct.pack(f'{len(self.value)}B', *self.value)
+        elif isinstance(self.value, str):
+            value = [ord(c) for c in self.value]
+            byte_data = struct.pack(f'{len(value)}B', *value)
+        elif isinstance(self.value, bool):
+            byte_data = struct.pack(f'?', self.value)
+        else:
+            raise TypeError(f'信号值类型错误, 当前类型: {type(self.value)}, 当前仅支持float/list/str类型')
+        # print('byte data: ', byte_data)
+        self.value_length = len(byte_data)
+        # print(self.value_length)
+        packed_data += struct.pack('B', self.value_length)
+        packed_data += byte_data
+        # print(packed_data)
+        return packed_data
 
 
 class SDCConnector(threading.Thread):
@@ -71,7 +100,7 @@ class SDCConnector(threading.Thread):
     注意: 该实例线程整个生命周期只能启动一次 (多线程的特性)
     """
     recv_buffer = bytes()
-    a2m_size = sizeof(StructA2M())
+    a2m_size = sizeof(StructA2M)
     _instance = None
     __first_init = False
     _instance_lock = threading.Lock()
@@ -139,28 +168,28 @@ class SDCConnector(threading.Thread):
 
     def tcp_send(self, signal):
         logger.info(f'发送TCP消息：{signal.name} = {signal.Value}')
-        signal_name = str(signal.name).replace('M2A_', '')
+        signal_name = str(signal.name).removeprefix('M2A_').removeprefix('A2A_')
         signal_value = signal.Value
         signal = StructM2A(signal_name, signal_value, map_data_type(signal_name))
         data = signal.pack()
         try:
-            self.client_socket.sendall(data)
+            self.client_socket.sendall(data)  # 缓存区还有空间时，即时服务端重启，此方法也不会抛出异常
         except socket.error:
             env.sil_node_status = 2
             if not self._is_reconnecting.is_set():
                 logger.warning('TCP连接断开, 正在尝试重连并重新发送消息')
                 self.reconnect_server()
             else:
-                # 等待重连事件结束
+                # 等待接收端重连事件结束
                 logger.info('TCP连接断开, 等待重连')
                 while self._is_reconnecting.is_set():
                     time.sleep(0.5)
-                # 重连完成后再次尝试发送数据
-                try:
-                    logger.info('重新发送成功消息成功')
-                    self.client_socket.sendall(data)
-                except Exception as e:
-                    logger.error(e)
+            # 重连完成后再次尝试发送数据
+            try:
+                logger.info('重新发送成功消息成功')
+                self.client_socket.sendall(data)
+            except Exception as e:
+                logger.error(e)
         except Exception as e:
             logger.error(e)
 
@@ -176,29 +205,52 @@ class SDCConnector(threading.Thread):
         if self.client_socket is None or self.client_socket.fileno() == -1:
             # 这里处理套接字未打开或已关闭的情况
             return
-        self.recv_buffer = bytes()
+        # bytearray 是可变的。在处理网络接收缓冲区时，数据通常需要多次扩展、截取和修改，使用可变对象可以减少不必要的对象创建和内存复制。
+        self.recv_buffer = bytearray()
         ready_to_read, ready_to_write, in_error = select([self.client_socket], [], [], 0.5)
         if ready_to_read:
             data = self.client_socket.recv(1024)
-            self.recv_buffer = self.recv_buffer + data
-            while len(self.recv_buffer) >= self.a2m_size:
-                package = self.recv_buffer[:self.a2m_size]
-                self.recv_buffer = self.recv_buffer[self.a2m_size:]
-                c = StructA2M()
-                memmove(addressof(c), package, sizeof(c))
-                signal_name = c.signalName
-                signal_value = c.signalValue
-                try:
-                    # if signal_name == b'StrWhlSeatAutoSeatSwReq_out_Inne':  # 信号名太长可能被截断
-                    #     signal_name = b'StrWhlSeatAutoSeatSwReq_out_Inner'
-                    signal_name_str = 'A2M_' + str(signal_name, encoding='utf-8')
-                    signal = Variable(signal_name_str)
-                except UnicodeDecodeError:
-                    pass
-                else:
-                    if signal is not None:
+            if data:
+                self.recv_buffer.extend(data)   # 将数据添加到接收缓冲区中
+                while len(self.recv_buffer) >= self.a2m_size:  # 检查缓冲区是否包含完整的数据包且处理粘包问题
+                    # 提取固定长度的部分(头部)
+                    head_package = self.recv_buffer[:self.a2m_size]
+                    del self.recv_buffer[:self.a2m_size]   # 移除已处理的数据包
+                    try:
+                        c = StructA2M()
+                        # 验证数据长度是否匹配结构体大小
+                        if len(head_package) != self.a2m_size:
+                            raise ValueError("Data length does not match the StructA2M size!")
+                        memmove(addressof(c), bytes(head_package), self.a2m_size)
+                    except Exception as e:
+                        logger.error(f'解包错误: {e}')
+                        continue
+                    # 提取数据段
+                    data_package = self.recv_buffer[:c.valueLength]
+                    del self.recv_buffer[:c.valueLength]
+                    # 对数据段进行解包
+                    try:
+                        # 提取动态长度部分(数据部)
+                        if c.signalType == 0x0C:  # 数组类型
+                            if c.valueLength > 0:
+                                c.signalValue = struct.unpack(f'{c.valueLength}B', data_package)
+                            else:
+                                c.signalValue = []
+                        else:   # 浮点型
+                            c.signalValue = struct.unpack('d', data_package)[0]
+                        signal_value = c.signalValue
+                        signal_name = c.signalName.decode('utf-8')  # 去除末尾的空字节
+                        if signal_name.endswith('_AB_Inner'):
+                            signal_name_str = 'A2A_' + signal_name
+                        else:
+                            signal_name_str = 'A2M_' + signal_name
+                        signal = Variable(signal_name_str)
                         signal.Value = signal_value
                         logger.info(f'接收TCP消息：{signal_name_str} = {signal_value}')
+                    except UnicodeDecodeError as e:
+                        logger.error(f'解包错误: {e}')
+                    except Exception as e:
+                        logger.error(f'接收数据错误: {e}')
 
     def add_additional_signals(self):
         Variable('SIL_Client_CnnctSt').Value = 1
@@ -212,17 +264,32 @@ class SDCConnector(threading.Thread):
                     if 'tx' in line:
                         index = line.find(',')
                         if index != -1:
-                            Variable('A2M_' + line[2:index], 0)
+                            signal_name = line[2:index]
+                            if signal_name.endswith('_AB_Inner'):
+                                Variable(f'A2A_{signal_name}', 0)
+                            else:
+                                Variable(f'A2M_{signal_name}', 0)
 
     def parse_dbo_m2a(self):
         if os.path.exists(self.dbo_filepath):
             with open(self.dbo_filepath, 'r') as file:
                 for line in file:
-                    if 'rx' in line:
+                    if 'rx' in line or 'tx' in line:
                         line_items = line.split(',')
                         signal_name = line_items[0][2:]
-                        Variable(f'M2A_{signal_name}', 0)
-                        M2A_NAME_TYPE[signal_name] = line_items[2]
+                        if signal_name.endswith('_AB_Inner'):
+                            prev = 'A2A_'
+                        else:
+                            prev = 'M2A_'
+                        signal_type = line_items[2]
+                        min_val = line[5]
+                        max_val = line[6]
+                        Variable(f'{prev}{signal_name}', 0)
+                        M2A_NAME_TYPE[signal_name] = {
+                            'signal_type': signal_type,
+                            'min_val': min_val,
+                            'max_val': max_val
+                        }
 
     def pre_init(self):
         logger.info('Parse dbo signals to Variable')
@@ -248,16 +315,19 @@ class SDCConnector(threading.Thread):
 
 
 if __name__ == '__main__':
-    sdc_client = SDCConnector(env.dbo_filepath, server_ip=env.sil_server_ip, server_port=1111)
+    print(sizeof(StructA2M))
+    sdc_client = SDCConnector(env.dbo_filepath, server_ip=env.sil_server_ip, server_port=60000)
     sdc_client.connect_server()  # 必须要先调用
     sdc_client.start()  # I/O多路复用 持续接收
+    print(M2A_NAME_TYPE)
+    a = 1
     # time.sleep(2)
     # sdc_client.reconnect_server()
     #
-    # # 接收同时测试发送
-    # # 这一步全局Variable已经初始化完成了，只需要改变信号值就行
-    # signal = Variable('M2A_FrtACSwSts_Inner')
-    # signal.Value = 1
-    # while True:
-    #     sdc_client.tcp_send(signal)
-    #     time.sleep(2)
+    # 接收同时测试发送
+    # 这一步全局Variable已经初始化完成了，只需要改变信号值就行
+    signal = Variable('M2A_FrtACSwSts_Inner')
+    signal.Value = 1.0
+    while True:
+        sdc_client.tcp_send(signal)
+        time.sleep(2)

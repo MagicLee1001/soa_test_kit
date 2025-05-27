@@ -3,13 +3,13 @@ width: 900
 height: 600
 
 # cloud
-remote_server: https://test-manager.ontest.k8s.chj.cloud
+remote_server: https://xxx
 svn_username: xxx
 svn_password: xxx
 
 # feishu
 notice_chat_id: oc_9595c250eabd2767fb622a0de7c3a236
-notice_base_url: https://iot-openapi-dev.chehejia.com/vvrobot
+notice_base_url: https://xxx/test-manager/vvBot
 notice_path: /hook/messages
 notice_temp_id: ctp_AA8KJSxbvB8x
 
@@ -17,11 +17,15 @@ notice_temp_id: ctp_AA8KJSxbvB8x
 ssh_hostname: 172.31.30.32
 ssh_username: root
 ssh_password: root
+ssh_port: 22
 local_net_segment: 172.31.30.166
 
 # sdc sil server
 sil_server_ip: 172.31.30.32
 sil_server_port: 60000
+
+# eid_fid_cli server
+eid_fid_cli_port: 60001
 
 # vcs
 vcs_db_path: /app_data/vcs/
@@ -33,14 +37,27 @@ result_dir: data\result
 ssh_key_filepath: data\key\xcu_rsa_ssh
 idl_filepath: data\matrix\vbs_XBP1.2.0.xml
 dbo_filepath: data\matrix\dbc_lin_dbis_matrix.dbo
-sil_local_filepath: data\key\sil_eea25
+sil_local_filepath: data\key\sil_xbp_20240605
 sil_sdf_local_filepath: data\key\sil.sdf
+vss_cli_local_filepath: data\key\vss-cli
+eid_fid_cli_local_filepath: data\key\eid_fid_cli_1020
+eid_fid_cli_sdf_local_filepath: data\key\eid_fid_cli.sdf
 case_dir: data\case\debug
 
 # remote filepath
 sil_remote_filepath: /apps/x01/bin/sil
 sil_sdf_remote_filepath: /apps/x01/sdf/sil.sdf
 dbo_remote_filepath: /apps/x01/etc/sdc/dbc_lin_dbis_matrix.dbo
+
+# db
+mysql:
+  db_bsp_dcl:
+    host: ob-public01-test-40110.inner.chj.cloud
+    port: 13307
+    user: bsp_dcl_rw@public#ob_public01_test_40110
+    password: "%BhE4L@6KAu3B!3Vi+L"
+    database: bsp_dcl
+    charset:  utf8mb4
 
 # dds
 sub_topics:

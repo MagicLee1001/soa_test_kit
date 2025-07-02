@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # @Author  : Li Kun
 # @Time    : 2023/11/1 16:50
-# @File    : sil_xbp.py
+# @File    : soa_test_kit.py
 
 import os
 import sys

@@ -212,7 +212,7 @@ Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (
 
 1. 检查当前dds矩阵文件是否适配
     ```
-    .\data\matrix\XBP.xml
+    .\data\matrix\rti_soa.xml
     ```
 2. 维护当前dds环境变量（不能漏写,可以多写）
     ```

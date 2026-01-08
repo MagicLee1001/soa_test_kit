@@ -140,34 +140,6 @@ Python 3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (
                                   }
     db_bsp_dcl_output               : (输出信号) 可以查看sql语句执行结果
     
-    
-    # 打滑预控信号
-    httpReq_SlipControl             : (输入信号) http请求，1:表示请求打滑预控车端上报数据; 2:表示请求打滑预控云端指令下发数据
-    httpResp_SlipControl_UploadData : (输出信号) http响应，打滑预控车端上报数据记录
-    httpResp_SlipControl_JobData    : (输出信号) http响应，打滑预控云端指令下发记录
-    bsp_SPID_AB_Inner               : (输出信号) http响应，打滑预控打滑ID
-    bsp_SPLat_AB_Inner              : (输出信号) http响应，打滑预控车端上报打滑点经度
-    bsp_SPLon_AB_Inner              : (输出信号) http响应，打滑预控车端上报打滑点纬度
-    bsp_SPSta_AB_Inner              : (输出信号) http响应，打滑预控车端上报打滑状态
-    bsp_SPAdh_AB_Inner              : (输出信号) http响应，打滑预控车端上报打滑附着利用率
-    bsp_VehSlipTime_AB_Inner        : (输出信号) http响应，打滑预控车端上报打滑时长
-    bsp_SlipPreCtrlSta_AB_Inner     : (输出信号) http响应，打滑预控车端上报打滑预控状态
-    bsp_SlipPoints                  : (输出信号) http响应，打滑点信息
-    bsp_SlipJobData_createTime      : (输出信号) http响应，打滑预控云端指令下发记录
-    bsp_SlipUploadData_createTime   : (输出信号) http响应，打滑预控车端上报数据记录时间
-    bsp_SlipPointsNum               : (输出信号) http响应，附近打滑点数
-    
-    # 诊断专家信号
-    eid_fid_                        : (输入信号) 下划线后面跟信号名，模拟eid fid故障信号
-    httpReq_DiagExpert_warnInfo     : (输入信号) http请求，1：表示请求roadsise_breakdown最新告警信息；2：表示请求flow_control告警信息
-    httpReq_DiagExpert_treeInfo     : (输入信号) http请求，1：表示请求roadsize_breakdown故障树信息；2：表示请求flow_control故障树信息，
-    httpResp_DiagExpert_warnInfo    : (输出信号) http响应，故障告警信息
-    httpResp_DiagExpert_treeInfo    : (输出信号) http响应，故障树信息
-    bsp_DiagExpert_warnId           : (输出信号) 最新故障告警id
-    bsp_DiagExpert_treeName         : (输出信号) 最新故障树名称
-    bsp_DiagExpert_treeNodeNames    : (输出信号) list类型，最新故障树子节点名称
-    bsp_DiagExpert_treeNodeSignals  : (输出信号) dict类型，最新故障树子节点信号名、信号值
-    bsp_DiagExpert_treeNodeSignal_  : (输出信号) 后跟故障树子节点信号名，如 bsp_DiagExpert_treeNodeSignal_XCUVehMd
 
     ```
 2. 用例语法
